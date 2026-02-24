@@ -1,0 +1,8 @@
+{
+  "basePath": "/Users/yourname/Desktop/",
+  "favorites": [
+    "/Users/yourname/Desktop/my-project-1",
+    "/Users/yourname/Desktop/my-project-2"
+  ],
+  "defaultCommand": "claude"
+}

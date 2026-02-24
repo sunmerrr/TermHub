@@ -1,0 +1,303 @@
+require("dotenv").config();
+const http = require("http");
+const { execSync } = require("child_process");
+const fs = require("fs");
+const path = require("path");
+const { WebSocketServer } = require("ws");
+
+const PORT = process.env.PORT || 8080;
+const PASSWORD = process.env.DASHBOARD_PASSWORD || "changeme";
+
+if (PASSWORD === "changeme") {
+  console.warn("⚠️  Using default password. Please set DASHBOARD_PASSWORD environment variable.");
+}
+
+const sessions = new Map();
+const workers = new Map();
+let nextId = 1;
+
+function createToken() {
+  return Math.random().toString(36).slice(2) + Date.now().toString(36);
+}
+
+function isAlive(sessionName) {
+  try {
+    execSync(`tmux has-session -t ${sessionName}`, { encoding: "utf8", stdio: "pipe" });
+    return true;
+  } catch (e) {
+    return false;
+  }
+}
+
+function tmux(cmd) {
+  try { return execSync("tmux " + cmd, { encoding: "utf8", stdio: "pipe" }); }
+  catch (e) { return ""; }
+}
+
+function loadConfig() {
+  const configPath = path.join(__dirname, "config.json");
+  return fs.existsSync(configPath) ? JSON.parse(fs.readFileSync(configPath, "utf8")) : {};
+}
+
+function spawnWorker(cwd, cmd) {
+  const config = loadConfig();
+  cmd = cmd || config.defaultCommand || "claude";
+  const id = String(nextId++);
+  const sessionName = "term-" + id;
+  tmux(`new-session -d -s ${sessionName} -c "${cwd}" "${cmd}"`);
+  const logs = [];
+  workers.set(id, { sessionName, cwd, cmd, logs });
+  const pollTimer = setInterval(() => pollOutput(id), 1000);
+  workers.get(id).pollTimer = pollTimer;
+  broadcast({ type: "spawned", id, cwd, cmd, status: "running", sessionName });
+  return id;
+}
+
+let lastCapture = {};
+
+function pollOutput(id) {
+  const w = workers.get(id);
+  if (!w) return;
+  if (!isAlive(w.sessionName)) {
+    clearInterval(w.pollTimer);
+    broadcast({ type: "status", id, status: "stopped" });
+    return;
+  }
+  const cols = w.cols || 80;
+  const rows = w.rows || 50;
+  tmux(`resize-window -t ${w.sessionName} -x ${cols} -y ${rows}`);
+  const output = tmux(`capture-pane -t ${w.sessionName} -p -S -500 -J`);
+
+  // Track actual working directory
+  const currentCwd = tmux(`display-message -t ${w.sessionName} -p "#{pane_current_path}"`).trim();
+  if (currentCwd && currentCwd !== w.cwd) {
+    w.cwd = currentCwd;
+    broadcast({ type: "cwd", id, cwd: currentCwd });
+  }
+
+  if (output === lastCapture[id]) return;
+  lastCapture[id] = output;
+  const lines = output.split("\n");
+  w.logs = lines.slice(-200).map(text => ({ src: "stdout", text, ts: Date.now() }));
+  broadcast({ type: "snapshot", id, lines });
+}
+
+function sendInput(id, text) {
+  const w = workers.get(id);
+  if (!w) return false;
+  const lines = text.split("\n");
+  for (const line of lines) {
+    tmux(`send-keys -t ${w.sessionName} "${line.replace(/"/g, '\\"')}" ""`);
+    tmux(`send-keys -t ${w.sessionName} "" Enter`);
+  }
+  broadcast({ type: "log", id, src: "stdin", text, ts: Date.now() });
+  return true;
+}
+
+function killWorker(id) {
+  const w = workers.get(id);
+  if (!w) return false;
+  clearInterval(w.pollTimer);
+  tmux(`kill-session -t ${w.sessionName}`);
+  broadcast({ type: "status", id, status: "stopped" });
+  return true;
+}
+
+let wss;
+function broadcast(obj) {
+  if (!wss) return;
+  const msg = JSON.stringify(obj);
+  wss.clients.forEach(c => { if (c.readyState === 1) c.send(msg); });
+}
+
+function readBody(req) {
+  return new Promise(res => {
+    let buf = "";
+    req.on("data", c => (buf += c));
+    req.on("end", () => res(buf));
+  });
+}
+
+function json(res, code, obj) {
+  res.writeHead(code, { "Content-Type": "application/json" });
+  res.end(JSON.stringify(obj));
+}
+
+function auth(req) {
+  const cookie = req.headers.cookie || "";
+  const token = cookie.split(";").map(s => s.trim()).find(s => s.startsWith("token="))?.slice(6);
+  return token && sessions.has(token);
+}
+
+const server = http.createServer(async (req, res) => {
+  const { method, url } = req;
+
+  if (method === "OPTIONS") {
+    res.writeHead(204, { "Access-Control-Allow-Origin": "*", "Access-Control-Allow-Headers": "Content-Type" });
+    return res.end();
+  }
+
+  if (method === "POST" && url === "/api/login") {
+    const body = JSON.parse(await readBody(req));
+    if (body.pw === PASSWORD) {
+      const token = createToken();
+      sessions.set(token, true);
+      res.writeHead(200, { "Set-Cookie": `token=${token}; Path=/; HttpOnly`, "Content-Type": "application/json" });
+      return res.end(JSON.stringify({ ok: true }));
+    }
+    return json(res, 401, { ok: false });
+  }
+
+  if (method === "GET" && url === "/") {
+    const html = fs.readFileSync(path.join(__dirname, "index.html"));
+    res.writeHead(200, { "Content-Type": "text/html; charset=utf-8" });
+    return res.end(html);
+  }
+
+  const MIME = { ".css": "text/css", ".js": "application/javascript" };
+  const ext = path.extname(url);
+  if (method === "GET" && MIME[ext]) {
+    const safePath = path.normalize(url).replace(/^(\.\.[\/\\])+/, '');
+    const filePath = path.join(__dirname, "public", safePath);
+    if (filePath.startsWith(path.join(__dirname, "public")) && fs.existsSync(filePath)) {
+      res.writeHead(200, { "Content-Type": MIME[ext] + "; charset=utf-8" });
+      return res.end(fs.readFileSync(filePath));
+    }
+  }
+
+  if (method === "GET" && url === "/api/config") {
+    if (!auth(req)) return json(res, 401, { error: "unauthorized" });
+    const configPath = path.join(__dirname, "config.json");
+    const config = fs.existsSync(configPath) ? JSON.parse(fs.readFileSync(configPath, "utf8")) : {};
+    return json(res, 200, config);
+  }
+
+  if (!auth(req)) return json(res, 401, { error: "unauthorized" });
+
+  if (method === "GET" && url === "/api/workers") {
+    const list = [...workers.entries()].map(([id, w]) => ({
+      id, cwd: w.cwd, cmd: w.cmd || "claude", status: isAlive(w.sessionName) ? "running" : "stopped", sessionName: w.sessionName, logs: w.logs
+    }));
+    return json(res, 200, list);
+  }
+
+  if (method === "GET" && url === "/api/scan") {
+    const raw = tmux("ls -F '#{session_name}|#{pane_current_path}'");
+    const existingNames = new Set([...workers.values()].map(w => w.sessionName));
+    const found = [];
+    for (const line of raw.trim().split("\n")) {
+      if (!line) continue;
+      const [sessionName, cwd] = line.split("|");
+      if (existingNames.has(sessionName)) continue;
+      found.push({ sessionName, cwd: cwd || "unknown" });
+    }
+    return json(res, 200, found);
+  }
+
+  if (method === "POST" && url === "/api/attach") {
+    const { sessionName, cwd } = JSON.parse(await readBody(req));
+    const id = String(nextId++);
+    workers.set(id, { sessionName, cwd, logs: [] });
+    const pollTimer = setInterval(() => pollOutput(id), 1000);
+    workers.get(id).pollTimer = pollTimer;
+    broadcast({ type: "spawned", id, cwd, status: "running", sessionName });
+    return json(res, 200, { id });
+  }
+
+  if (method === "POST" && url === "/api/spawn") {
+    const body = JSON.parse(await readBody(req));
+    const id = spawnWorker(body.cwd || process.cwd(), body.cmd);
+    return json(res, 200, { id });
+  }
+
+  if (method === "POST" && url === "/api/input") {
+    const { id, text } = JSON.parse(await readBody(req));
+    const ok = sendInput(id, text);
+    return json(res, 200, { ok });
+  }
+
+  if (method === "POST" && url === "/api/remove") {
+    const { id } = JSON.parse(await readBody(req));
+    const w = workers.get(id);
+    if (w) { clearInterval(w.pollTimer); workers.delete(id); }
+    return json(res, 200, { ok: true });
+  }
+
+  if (method === "POST" && url === "/api/key") {
+    const { id, key } = JSON.parse(await readBody(req));
+    const w = workers.get(id);
+    if (w) tmux(`send-keys -t ${w.sessionName} ${key}`);
+    return json(res, 200, { ok: true });
+  }
+
+  if (method === "POST" && url === "/api/reconnect") {
+    const { id } = JSON.parse(await readBody(req));
+    const w = workers.get(id);
+    if (!w) return json(res, 404, { ok: false });
+    if (isAlive(w.sessionName)) {
+      clearInterval(w.pollTimer);
+      w.pollTimer = setInterval(() => pollOutput(id), 1000);
+      broadcast({ type: "status", id, status: "running" });
+      return json(res, 200, { ok: true });
+    }
+    return json(res, 200, { ok: false });
+  }
+
+  if (method === "POST" && url === "/api/kill") {
+    const { id } = JSON.parse(await readBody(req));
+    killWorker(id);
+    return json(res, 200, { ok: true });
+  }
+
+  json(res, 404, { error: "not found" });
+});
+
+wss = new WebSocketServer({ server });
+const clientSizes = new Map();
+wss.on('connection', ws => {
+  ws.on('message', raw => {
+    try {
+      const msg = JSON.parse(raw);
+      if (msg.type === 'resize') {
+        clientSizes.set(ws, { cols: msg.cols, rows: msg.rows });
+      }
+      if (msg.type === 'active') {
+        const size = clientSizes.get(ws);
+        if (size) workers.forEach(w => { w.cols = size.cols; w.rows = size.rows; });
+      }
+    } catch (e) {}
+  });
+  ws.on('close', () => clientSizes.delete(ws));
+});
+
+
+function recoverSessions() {
+  const raw = tmux("ls -F '#{session_name}|#{pane_current_path}|#{pane_current_command}'");
+  if (!raw.trim()) return;
+  for (const line of raw.trim().split("\n")) {
+    if (!line) continue;
+    const parts = line.split("|");
+    const sessionName = parts[0];
+    const cwd = parts[1] || "unknown";
+    const cmd = parts[2] || "unknown";
+    if (!sessionName.startsWith("term-")) continue;
+    const id = sessionName.replace("term-", "");
+    const numId = parseInt(id);
+    if (isNaN(numId)) continue;
+    if (workers.has(id)) continue;
+    workers.set(id, { sessionName, cwd, cmd, logs: [] });
+    const pollTimer = setInterval(() => pollOutput(id), 1000);
+    workers.get(id).pollTimer = pollTimer;
+    if (numId >= nextId) nextId = numId + 1;
+  }
+  if (workers.size > 0) {
+    console.log(`♻️  Recovered ${workers.size} session(s)`);
+  }
+}
+
+server.listen(PORT, () => {
+  recoverSessions();
+  console.log(`✅ TermHub running → http://localhost:${PORT}`);
+  console.log(`🔑 Password: ${PASSWORD}`);
+  console.log(`📺 View tmux session: tmux attach -t term-1`);
+});
