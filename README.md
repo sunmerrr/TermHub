@@ -13,6 +13,11 @@ A web dashboard for managing multiple terminal sessions via tmux. Run any comman
   - Split mode: view multiple workers side by side (up to 3 columns, grid for 4+)
 - **Favorites & recent paths** — quick access to frequently used project directories
 - **tmux session scanning** — auto-detect and attach to existing tmux sessions
+- **AI state detection** — automatically detects Claude Code's state from terminal output:
+  - 🔵 **Working** — AI is actively processing
+  - 🟢 **Idle** — task complete, waiting for user input
+  - 🟡 **Waiting** (pulsing) — permission or decision required
+  - 🔴 **Stopped** / 🟢 **Completed** — session ended
 - **Live status** — running / stopped status updated in real time
 - **Password authentication** — protect external access
 - **ngrok support** — access from mobile or other external devices

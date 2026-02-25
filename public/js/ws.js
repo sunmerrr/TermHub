@@ -21,8 +21,10 @@ function handleMsg(d) {
   if (d.type === 'log') appendLog(d.id, d.src, d.text);
   if (d.type === 'status') updateStatus(d.id, d.status);
   if (d.type === 'cwd') updateCwd(d.id, d.cwd);
+  if (d.type === 'aiState') updateAIState(d.id, d.state);
   if (d.type === 'snapshot') {
     document.querySelectorAll('#logs-' + d.id).forEach(box => {
+      var wasAtBottom = isNearBottom(box);
       box.innerHTML = '';
       d.lines.forEach(text => {
         const line = document.createElement('div');
@@ -30,7 +32,7 @@ function handleMsg(d) {
         line.textContent = text;
         box.appendChild(line);
       });
-      box.scrollTop = box.scrollHeight;
+      if (wasAtBottom) box.scrollTop = box.scrollHeight;
     });
   }
 }
@@ -83,7 +85,10 @@ function apiGet(url) {
 
 function loadAll() {
   apiGet('/api/workers')
-    .then(list => list.forEach(w => ensureCard(w.id, w.cwd, w.status, w.logs, w.cmd)));
+    .then(list => list.forEach(w => {
+      ensureCard(w.id, w.cwd, w.status, w.logs, w.cmd);
+      if (w.aiState) updateAIState(w.id, w.aiState);
+    }));
 }
 
 function loadConfig() {

@@ -1,7 +1,7 @@
 // ── Worker Card UI ──
 
 function killBtnHtml(id, status) {
-  if (status === 'stopped') {
+  if (status === 'stopped' || status === 'completed') {
     return '<button class="kill-btn" id="kill-' + id + '" style="border-color:#f85149;color:#f85149">Remove</button>';
   }
   return '<button class="kill-btn" id="kill-' + id + '">Stop</button>';
@@ -17,12 +17,12 @@ function ensureCard(id, cwd, status, logs, cmd) {
   card.innerHTML =
     '<div class="card-header">' +
       '<span class="card-title" id="card-title-' + id + '">#' + id + ' ' + cmdLabel + ' · ' + (cwd.replace(/\/$/, '').split('/').pop() || cwd) + '</span>' +
-      '<span class="badge' + (status === 'stopped' ? ' stopped' : '') + '" id="badge-' + id + '">' + status + '</span>' +
+      '<span class="badge' + (status === 'stopped' ? ' stopped' : '') + (status === 'completed' ? ' completed' : '') + '" id="badge-' + id + '">' + status + '</span>' +
       killBtnHtml(id, status) +
     '</div>' +
     '<div class="card-cwd">' + displayPath(cwd) + '</div>' +
     '<div class="logs" id="logs-' + id + '"></div>' +
-    '<div class="input-row" id="input-row-' + id + '"' + (status === 'stopped' ? ' style="display:none"' : '') + '>' +
+    '<div class="input-row" id="input-row-' + id + '"' + (status === 'stopped' || status === 'completed' ? ' style="display:none"' : '') + '>' +
       '<textarea id="inp-' + id + '" placeholder="Enter command..." rows="1"></textarea>' +
       '<button id="send-' + id + '">Send</button>' +
       '<div class="toolkit-wrap">' +
@@ -56,7 +56,7 @@ function ensureCard(id, cwd, status, logs, cmd) {
   tab.className = 'tab';
   tab.dataset.id = id;
   var folder = cwd.replace(/\/$/, '').split('/').pop() || cwd;
-  tab.innerHTML = '<span class="tab-dot' + (status === 'stopped' ? ' stopped' : '') + '" id="tab-dot-' + id + '"></span><span class="tab-label" id="tab-label-' + id + '">#' + id + ' ' + (cmd || 'claude') + ' · ' + folder + '</span>';
+  tab.innerHTML = '<span class="tab-dot' + (status === 'stopped' ? ' stopped' : '') + (status === 'completed' ? ' completed' : '') + '" id="tab-dot-' + id + '"></span><span class="tab-label" id="tab-label-' + id + '">#' + id + ' ' + (cmd || 'claude') + ' · ' + folder + '</span>';
   tab.addEventListener('click', () => selectTab(id));
   document.getElementById('tab-bar').appendChild(tab);
 
@@ -128,25 +128,31 @@ function bindCard(id, root) {
 
 // ── Logs ──
 
+function isNearBottom(box) {
+  return box.scrollHeight - box.scrollTop - box.clientHeight < 50;
+}
+
 function appendLog(id, src, text) {
   document.querySelectorAll('#logs-' + id).forEach(box => {
+    var wasAtBottom = isNearBottom(box);
     const line = document.createElement('div');
     line.className = 'log-line ' + src;
     line.textContent = text;
     box.appendChild(line);
-    box.scrollTop = box.scrollHeight;
+    if (wasAtBottom) box.scrollTop = box.scrollHeight;
   });
 }
 
 function updateStatus(id, status) {
+  var isStopped = status === 'stopped' || status === 'completed';
   document.querySelectorAll('#badge-' + id).forEach(el => {
     el.textContent = status;
-    el.className = 'badge' + (status === 'stopped' ? ' stopped' : '');
+    el.className = 'badge' + (status === 'stopped' ? ' stopped' : '') + (status === 'completed' ? ' completed' : '');
   });
   document.querySelectorAll('#tab-dot-' + id).forEach(el => {
-    el.className = 'tab-dot' + (status === 'stopped' ? ' stopped' : '');
+    el.className = 'tab-dot' + (status === 'stopped' ? ' stopped' : '') + (status === 'completed' ? ' completed' : '');
   });
-  if (status === 'stopped') {
+  if (isStopped) {
     document.querySelectorAll('#kill-' + id).forEach(btn => {
       btn.textContent = 'Remove';
       btn.style.background = '#21262d';
@@ -177,6 +183,31 @@ function updateStatus(id, status) {
     });
     document.querySelectorAll('#input-row-' + id).forEach(el => el.style.display = '');
   }
+}
+
+function updateAIState(id, state) {
+  // Skip if worker is stopped/completed
+  var badge = document.querySelector('#badge-' + id);
+  if (badge && (badge.classList.contains('stopped') || badge.classList.contains('completed'))) return;
+
+  document.querySelectorAll('#tab-dot-' + id).forEach(function(el) {
+    el.classList.remove('ai-idle', 'ai-waiting');
+    if (state === 'idle') el.classList.add('ai-idle');
+    else if (state === 'waiting') el.classList.add('ai-waiting');
+  });
+
+  document.querySelectorAll('#badge-' + id).forEach(function(el) {
+    el.classList.remove('ai-idle', 'ai-waiting');
+    if (state === 'idle') {
+      el.classList.add('ai-idle');
+      el.textContent = 'idle';
+    } else if (state === 'waiting') {
+      el.classList.add('ai-waiting');
+      el.textContent = 'waiting';
+    } else {
+      el.textContent = 'running';
+    }
+  });
 }
 
 function removeWorker(id) {

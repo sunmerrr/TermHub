@@ -4,7 +4,7 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
 <title>TermHub</title>
-<link rel="stylesheet" href="/style.css">
+<link rel="stylesheet" href="/style.css?v=2">
 </head>
 <body>
 
@@ -19,9 +19,12 @@
   <header>
     <div id="status-dot" class="off"></div>
     <h1>TermHub</h1>
+    <div class="layout-group">
+      <button id="layout-tab-btn" class="header-btn layout-active">Tab</button>
+      <button id="layout-split-btn" class="header-btn">Split</button>
+    </div>
+    <div class="header-divider"></div>
     <button id="scan-btn" class="header-btn">🔍</button>
-    <button id="layout-tab-btn" class="header-btn layout-active">Tab</button>
-    <button id="layout-split-btn" class="header-btn">Split</button>
     <button id="toggle-toolbar-btn" class="header-btn accent">+</button>
   </header>
 
@@ -53,10 +56,10 @@
   </div>
 </div>
 
-<script src="/js/layout.js"></script>
-<script src="/js/favorites.js"></script>
-<script src="/js/ws.js"></script>
-<script src="/js/workers.js"></script>
-<script src="/js/app.js"></script>
+<script src="/js/layout.js?v=2"></script>
+<script src="/js/favorites.js?v=2"></script>
+<script src="/js/ws.js?v=2"></script>
+<script src="/js/workers.js?v=2"></script>
+<script src="/js/app.js?v=2"></script>
 </body>
 </html>

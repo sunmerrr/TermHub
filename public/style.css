@@ -82,6 +82,31 @@ header h1 {
   border-color: #2ea043;
 }
 
+.header-divider {
+  width: 1px;
+  height: 18px;
+  background: #30363d;
+  flex-shrink: 0;
+}
+
+.layout-group {
+  display: flex;
+  gap: 0;
+}
+
+.layout-group .header-btn {
+  border-radius: 0;
+}
+
+.layout-group .header-btn:first-child {
+  border-radius: 6px 0 0 6px;
+}
+
+.layout-group .header-btn:last-child {
+  border-radius: 0 6px 6px 0;
+  border-left: none;
+}
+
 .header-btn.layout-active {
   background: #1f6feb;
   border-color: #1f6feb;
@@ -270,6 +295,24 @@ header h1 {
   background: #f85149;
 }
 
+.tab-dot.completed {
+  background: #3fb950;
+}
+
+.tab-dot.ai-idle {
+  background: #3fb950;
+}
+
+.tab-dot.ai-waiting {
+  background: #d29922;
+  animation: pulse 1.5s ease-in-out infinite;
+}
+
+@keyframes pulse {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.3; }
+}
+
 /* ── Content Area ──────────────────────────────────── */
 
 #content {
@@ -352,6 +395,21 @@ header h1 {
 .badge.stopped {
   background: #f8514922;
   color: #f85149;
+}
+
+.badge.completed {
+  background: #3fb95022;
+  color: #3fb950;
+}
+
+.badge.ai-idle {
+  background: #3fb95022;
+  color: #3fb950;
+}
+
+.badge.ai-waiting {
+  background: #d2992222;
+  color: #d29922;
 }
 
 .kill-btn {

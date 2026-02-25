@@ -53,6 +53,21 @@ function spawnWorker(cwd, cmd) {
   return id;
 }
 
+function detectWaiting(output) {
+  const lines = output.split("\n");
+  const recent = lines.slice(-10).join("\n");
+  // Common permission/decision patterns across AI CLIs
+  if (/Esc to cancel/.test(recent)) return true;
+  if (/Do you want to proceed\?/.test(recent)) return true;
+  if (/❯\s*\d+\.\s*(Yes|No)/.test(recent)) return true;
+  if (/Allow/.test(recent) && /\?/.test(recent)) return true;
+  if (/\([Yy]\/[Nn]\)/.test(recent) || /\[[Yy]\/[Nn]\]/.test(recent) || /\[[yY]\/[nN]\]/.test(recent)) return true;
+  if (/approve|confirm|accept/i.test(recent) && /\?/.test(recent)) return true;
+  return false;
+}
+
+const IDLE_THRESHOLD = 5000; // 5 seconds of no output change → idle
+
 let lastCapture = {};
 
 function pollOutput(id) {
@@ -60,7 +75,9 @@ function pollOutput(id) {
   if (!w) return;
   if (!isAlive(w.sessionName)) {
     clearInterval(w.pollTimer);
-    broadcast({ type: "status", id, status: "stopped" });
+    w.status = 'completed';
+    w.aiState = null;
+    broadcast({ type: "status", id, status: "completed" });
     return;
   }
   const cols = w.cols || 80;
@@ -75,11 +92,35 @@ function pollOutput(id) {
     broadcast({ type: "cwd", id, cwd: currentCwd });
   }
 
-  if (output === lastCapture[id]) return;
+  if (output === lastCapture[id]) {
+    // Output unchanged — check if idle threshold reached
+    if (w.aiState !== 'idle' && w.aiState !== 'waiting' && w.lastChangeTime) {
+      const elapsed = Date.now() - w.lastChangeTime;
+      if (elapsed >= IDLE_THRESHOLD) {
+        const waiting = detectWaiting(output);
+        const newState = waiting ? 'waiting' : 'idle';
+        if (newState !== w.aiState) {
+          w.aiState = newState;
+          broadcast({ type: "aiState", id, state: newState });
+        }
+      }
+    }
+    return;
+  }
+
   lastCapture[id] = output;
+  w.lastChangeTime = Date.now();
   const lines = output.split("\n");
   w.logs = lines.slice(-200).map(text => ({ src: "stdout", text, ts: Date.now() }));
   broadcast({ type: "snapshot", id, lines });
+
+  // Output just changed — check for waiting, otherwise working
+  const waiting = detectWaiting(output);
+  const aiState = waiting ? 'waiting' : 'working';
+  if (aiState !== w.aiState) {
+    w.aiState = aiState;
+    broadcast({ type: "aiState", id, state: aiState });
+  }
 }
 
 function sendInput(id, text) {
@@ -99,6 +140,8 @@ function killWorker(id) {
   if (!w) return false;
   clearInterval(w.pollTimer);
   tmux(`kill-session -t ${w.sessionName}`);
+  w.status = 'stopped';
+  w.aiState = null;
   broadcast({ type: "status", id, status: "stopped" });
   return true;
 }
@@ -130,7 +173,8 @@ function auth(req) {
 }
 
 const server = http.createServer(async (req, res) => {
-  const { method, url } = req;
+  const { method } = req;
+  const url = req.url.split("?")[0];
 
   if (method === "OPTIONS") {
     res.writeHead(204, { "Access-Control-Allow-Origin": "*", "Access-Control-Allow-Headers": "Content-Type" });
@@ -176,7 +220,7 @@ const server = http.createServer(async (req, res) => {
 
   if (method === "GET" && url === "/api/workers") {
     const list = [...workers.entries()].map(([id, w]) => ({
-      id, cwd: w.cwd, cmd: w.cmd || "claude", status: isAlive(w.sessionName) ? "running" : "stopped", sessionName: w.sessionName, logs: w.logs
+      id, cwd: w.cwd, cmd: w.cmd || "claude", status: isAlive(w.sessionName) ? "running" : (w.status || "stopped"), sessionName: w.sessionName, logs: w.logs, aiState: w.aiState || null
     }));
     return json(res, 200, list);
   }
