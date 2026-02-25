@@ -7,24 +7,20 @@ A web dashboard for managing multiple terminal sessions via tmux. Run any comman
 ## Features
 
 - **Run any command** — spawn sessions with any CLI tool (default: `claude`)
-- **Manage multiple terminal sessions** — each runs as an independent worker in a tmux session
-- **Real-time logs** — captures and displays tmux session output in real time
+- **Multiple terminal sessions** — each runs as an independent worker in a tmux session
+- **Real-time logs** — captures and displays tmux output in real time
+- **AI state detection** — automatically detects AI CLI state from terminal output:
+  - 🔵 Working → 🟢 Idle → 🟡 Waiting (permission needed)
 - **Two-way mirroring** — view the same session from both the dashboard and your local terminal
-- **Tab / Split layout** — switch between views as needed
-  - Tab mode: focus on one worker at a time
-  - Split mode: view multiple workers side by side (up to 3 columns, grid for 4+)
-- **Favorites & recent paths** — quick access to frequently used project directories
-- **tmux session scanning** — auto-detect and attach to existing tmux sessions
-- **AI state detection** — automatically detects Claude Code's state from terminal output:
-  - 🔵 **Working** — AI is actively processing
-  - 🟢 **Idle** — task complete, waiting for user input
-  - 🟡 **Waiting** (pulsing) — permission or decision required
-  - 🔴 **Stopped** / 🟢 **Completed** — session ended
-- **Live status** — running / stopped status updated in real time
-- **Password authentication** — protect external access
-- **ngrok support** — access from mobile or other external devices
-- **Adaptive terminal size** — tmux resizes to match your device's screen
-- **Multiline input** — Shift+Enter for newlines, Enter to send
+- **Tab / Split layout** — Tab mode for focus, Split mode for side-by-side
+
+### More
+
+- **Favorites & recent paths** — quick access to frequently used directories
+- **tmux session scanning** — auto-detect and attach to existing sessions
+- **Smart scroll** — auto-scroll pauses when viewing history, resumes at bottom
+- **Password auth + ngrok** — secure external access from mobile or other devices
+- **Adaptive terminal size** — tmux resizes to match your screen
 - **Keyboard shortcuts** — Esc, Shift+Tab, Ctrl+C, arrow keys forwarded to active worker
 
 ## Prerequisites

@@ -280,7 +280,9 @@ function killWorker(id) {
 }
 
 function spawnSession() {
-  const cwd = document.getElementById('cwd-input').value.trim() || (window._basePath || '/tmp');
+  var raw = document.getElementById('cwd-input').value.trim();
+  var base = window._basePath || '/tmp';
+  var cwd = raw ? (raw.startsWith('/') ? raw : base + '/' + raw) : base;
   const cmd = document.getElementById('cmd-input').value.trim();
   addRecent(cwd);
   apiPost('/api/spawn', { cwd, cmd });
