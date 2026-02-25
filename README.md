@@ -1,5 +1,7 @@
 # TermHub
 
+[한국어](README.ko.md)
+
 A web dashboard for managing multiple terminal sessions via tmux. Run any command — Claude CLI, bash, python, or anything else — and monitor them all from one place.
 
 ## Features
