@@ -29,11 +29,11 @@ function ensureCard(id, cwd, status, logs, cmd) {
         '<button class="toolkit-toggle" id="tk-btn-' + id + '">⌨</button>' +
         '<div class="toolkit-popup" id="tk-popup-' + id + '">' +
           '<div class="tk-label">Keys</div>' +
-          '<div class="key-btns">' +
+          '<div class="key-grid">' +
+            '<button class="key-btn" id="key-esc-' + id + '">esc</button>' +
             '<button class="key-btn" id="key-up-' + id + '">↑</button>' +
             '<button class="key-btn" id="key-down-' + id + '">↓</button>' +
-            '<button class="key-btn" id="key-enter-' + id + '">↵</button>' +
-            '<button class="key-btn" id="key-esc-' + id + '">esc</button>' +
+            '<button class="key-btn key-enter" id="key-enter-' + id + '">↵</button>' +
             '<button class="key-btn" id="key-tab-' + id + '">tab</button>' +
             '<button class="key-btn" id="key-stab-' + id + '">⇧tab</button>' +
             '<button class="key-btn" id="key-ctrlc-' + id + '">⌃c</button>' +

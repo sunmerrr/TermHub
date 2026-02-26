@@ -547,6 +547,22 @@ header h1 {
   flex-wrap: wrap;
 }
 
+.key-grid {
+  display: grid;
+  grid-template-columns: repeat(4, 1fr);
+  gap: 4px;
+  width: 200px;
+}
+
+.key-grid .key-btn {
+  text-align: center;
+  padding: 4px 0;
+}
+
+.key-grid .key-enter {
+  font-size: 14px;
+}
+
 .key-btn {
   background: #161b22;
   border: 1px solid #30363d;
