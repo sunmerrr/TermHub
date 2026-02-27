@@ -1,5 +1,44 @@
 // ── Worker Card UI ──
 
+let customTitles = {};
+try {
+  customTitles = JSON.parse(localStorage.getItem('tabTitles') || '{}');
+} catch (e) {
+  customTitles = {};
+}
+
+function saveCustomTitles() {
+  localStorage.setItem('tabTitles', JSON.stringify(customTitles));
+}
+
+function getTitleBase(id, cmd) {
+  return customTitles[id] || cmd || 'claude';
+}
+
+function trimTitle(text) {
+  const max = 24;
+  if (text.length <= max) return text;
+  return text.slice(0, max - 1) + '…';
+}
+
+function renderTitle(id, cwd, cmd) {
+  const tab = document.querySelector('.tab[data-id="' + id + '"]');
+  const tabCwd = cwd || (tab && tab.dataset.cwd) || '';
+  const tabCmd = cmd || (tab && tab.dataset.cmd) || 'claude';
+  const folder = tabCwd.replace(/\/$/, '').split('/').pop() || tabCwd;
+  let text = '';
+  if (customTitles[id]) {
+    text = '#' + id + ' ' + customTitles[id];
+  } else {
+    text = '#' + id + ' ' + tabCmd + ' · ' + folder;
+  }
+  ['tab-label-' + id, 'card-title-' + id].forEach(function(elId) {
+    document.querySelectorAll('#' + elId).forEach(function(el) {
+      el.textContent = text;
+    });
+  });
+}
+
 function killBtnHtml(id, status) {
   if (status === 'stopped' || status === 'completed') {
     return '<button class="kill-btn" id="kill-' + id + '" style="border-color:#f85149;color:#f85149">Remove</button>';
@@ -55,12 +94,29 @@ function ensureCard(id, cwd, status, logs, cmd) {
   const tab = document.createElement('div');
   tab.className = 'tab';
   tab.dataset.id = id;
+  tab.dataset.cwd = cwd;
+  tab.dataset.cmd = cmdLabel;
   var folder = cwd.replace(/\/$/, '').split('/').pop() || cwd;
   tab.innerHTML = '<span class="tab-dot' + (status === 'stopped' ? ' stopped' : '') + (status === 'completed' ? ' completed' : '') + '" id="tab-dot-' + id + '"></span><span class="tab-label" id="tab-label-' + id + '">#' + id + ' ' + (cmd || 'claude') + ' · ' + folder + '</span>';
   tab.addEventListener('click', () => selectTab(id));
+  tab.addEventListener('dblclick', e => {
+    e.stopPropagation();
+    const current = customTitles[id] || cmdLabel;
+    const next = prompt('Tab title', current);
+    if (next === null) return;
+    const trimmed = next.trim();
+    if (!trimmed) {
+      delete customTitles[id];
+    } else {
+      customTitles[id] = trimTitle(trimmed);
+    }
+    saveCustomTitles();
+    renderTitle(id);
+  });
+  bindTabDrag(tab);
   document.getElementById('tab-bar').appendChild(tab);
 
-  if (!activeTab) selectTab(id);
+  selectTab(id);
 
   bindCard(id, panel);
   bindCard(id, splitCard);
@@ -72,6 +128,7 @@ function ensureCard(id, cwd, status, logs, cmd) {
     document.querySelectorAll('#input-row-' + id).forEach(el => el.style.display = 'none');
   }
 
+  renderTitle(id, cwd, cmdLabel);
   if (logs) logs.forEach(l => appendLog(id, l.src, l.text));
   setTimeout(sendResize, 100);
 }
@@ -238,15 +295,9 @@ function updateCwd(id, cwd) {
   document.querySelectorAll('.tab-panel[data-id="' + id + '"] .card-cwd').forEach(el => {
     el.textContent = displayPath(cwd);
   });
-  // Update tab label and card title folder name
-  var folder = cwd.replace(/\/$/, '').split('/').pop() || cwd;
-  ['tab-label-' + id, 'card-title-' + id].forEach(function(elId) {
-    document.querySelectorAll('#' + elId).forEach(function(el) {
-      var text = el.textContent;
-      var dotIdx = text.indexOf(' · ');
-      if (dotIdx !== -1) el.textContent = text.slice(0, dotIdx) + ' · ' + folder;
-    });
-  });
+  const tab = document.querySelector('.tab[data-id="' + id + '"]');
+  if (tab) tab.dataset.cwd = cwd;
+  renderTitle(id, cwd);
 }
 
 function reconnectWorker(id) {
@@ -284,8 +335,16 @@ function spawnSession() {
   var base = window._basePath || '/tmp';
   var cwd = raw ? (raw.startsWith('/') ? raw : base + '/' + raw) : base;
   const cmd = document.getElementById('cmd-input').value.trim();
-  addRecent(cwd);
-  apiPost('/api/spawn', { cwd, cmd });
+  apiPost('/api/spawn', { cwd, cmd })
+    .then(r => r.json().catch(() => ({})).then(d => ({ ok: r.ok, d })))
+    .then(({ ok, d }) => {
+      if (!ok || d.ok === false) {
+        alert(d.error || 'Invalid path. Worker not created.');
+        return;
+      }
+      addRecent(cwd);
+    })
+    .catch(() => { alert('Failed to create worker.'); });
 }
 
 function scanSessions() {

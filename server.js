@@ -250,8 +250,18 @@ const server = http.createServer(async (req, res) => {
 
   if (method === "POST" && url === "/api/spawn") {
     const body = JSON.parse(await readBody(req));
-    const id = spawnWorker(body.cwd || process.cwd(), body.cmd);
-    return json(res, 200, { id });
+    const rawCwd = body.cwd || process.cwd();
+    const resolvedCwd = path.resolve(rawCwd);
+    try {
+      const stat = fs.statSync(resolvedCwd);
+      if (!stat.isDirectory()) {
+        return json(res, 400, { ok: false, error: "Invalid path: not a directory." });
+      }
+    } catch (e) {
+      return json(res, 400, { ok: false, error: "Invalid path: does not exist or not accessible." });
+    }
+    const id = spawnWorker(resolvedCwd, body.cmd);
+    return json(res, 200, { ok: true, id });
   }
 
   if (method === "POST" && url === "/api/input") {

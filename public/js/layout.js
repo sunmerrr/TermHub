@@ -36,3 +36,73 @@ function selectTab(id) {
   document.querySelectorAll('.tab').forEach(t => t.classList.toggle('active', t.dataset.id === id));
   document.querySelectorAll('.tab-panel').forEach(p => p.classList.toggle('active', p.dataset.id === id));
 }
+
+function switchTab(delta) {
+  const tabs = Array.from(document.querySelectorAll('.tab'));
+  if (!tabs.length) return;
+  if (!activeTab) {
+    selectTab(tabs[0].dataset.id);
+    return;
+  }
+  const idx = tabs.findIndex(t => t.dataset.id === activeTab);
+  const next = idx === -1 ? 0 : (idx + delta + tabs.length) % tabs.length;
+  selectTab(tabs[next].dataset.id);
+}
+
+function bindTabDrag(tab) {
+  tab.draggable = true;
+  tab.addEventListener('dragstart', e => {
+    tab.classList.add('dragging');
+    e.dataTransfer.effectAllowed = 'move';
+    e.dataTransfer.setData('text/plain', tab.dataset.id);
+  });
+  tab.addEventListener('dragend', () => {
+    tab.classList.remove('dragging');
+  });
+}
+
+function getDragAfterElement(container, x) {
+  const els = [...container.querySelectorAll('.tab:not(.dragging)')];
+  let closest = { offset: Number.NEGATIVE_INFINITY, element: null };
+  els.forEach(el => {
+    const box = el.getBoundingClientRect();
+    const offset = x - box.left - box.width / 2;
+    if (offset < 0 && offset > closest.offset) {
+      closest = { offset, element: el };
+    }
+  });
+  return closest.element;
+}
+
+const tabBar = document.getElementById('tab-bar');
+if (tabBar) {
+  const indicator = document.createElement('div');
+  indicator.id = 'tab-drop-indicator';
+  tabBar.appendChild(indicator);
+
+  tabBar.addEventListener('dragover', e => {
+    e.preventDefault();
+    const dragging = document.querySelector('.tab.dragging');
+    if (!dragging) return;
+    const after = getDragAfterElement(tabBar, e.clientX);
+    if (!after) tabBar.appendChild(dragging);
+    else tabBar.insertBefore(dragging, after);
+
+    const target = after || tabBar.lastElementChild;
+    if (!target) return;
+    const rect = target.getBoundingClientRect();
+    const barRect = tabBar.getBoundingClientRect();
+    const x = after ? rect.left - barRect.left : rect.right - barRect.left;
+    indicator.style.transform = `translateX(${x}px)`;
+    indicator.classList.add('show');
+  });
+
+  tabBar.addEventListener('dragleave', e => {
+    if (e.relatedTarget && tabBar.contains(e.relatedTarget)) return;
+    indicator.classList.remove('show');
+  });
+
+  tabBar.addEventListener('drop', () => {
+    indicator.classList.remove('show');
+  });
+}

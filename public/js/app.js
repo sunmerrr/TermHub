@@ -59,6 +59,16 @@ window.addEventListener('resize', sendResize);
 document.addEventListener('keydown', e => {
   if (!activeTab) return;
 
+  if (e.altKey && !e.ctrlKey && !e.metaKey && !e.shiftKey && e.code === 'BracketLeft') {
+    e.preventDefault();
+    switchTab(-1);
+    return;
+  } else if (e.altKey && !e.ctrlKey && !e.metaKey && !e.shiftKey && e.code === 'BracketRight') {
+    e.preventDefault();
+    switchTab(1);
+    return;
+  }
+
   if (e.key === 'Escape') {
     e.preventDefault();
     sendSpecialKey(activeTab, 'Escape');
@@ -75,9 +85,11 @@ document.addEventListener('keydown', e => {
     e.preventDefault();
     sendSpecialKey(activeTab, 'Enter');
   } else if (e.key === 'ArrowUp') {
+    if (e.target.closest('.input-row')) return;
     e.preventDefault();
     sendSpecialKey(activeTab, 'Up');
   } else if (e.key === 'ArrowDown') {
+    if (e.target.closest('.input-row')) return;
     e.preventDefault();
     sendSpecialKey(activeTab, 'Down');
   }

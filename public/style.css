@@ -250,6 +250,7 @@ header h1 {
   display: flex;
   overflow-x: auto;
   flex-shrink: 0;
+  position: relative;
 }
 
 #tab-bar::-webkit-scrollbar {
@@ -281,6 +282,26 @@ header h1 {
   background: #0d1117;
   color: #e6edf3;
   border-bottom: 2px solid #1f6feb;
+}
+
+.tab.dragging {
+  opacity: 0.4;
+}
+
+#tab-drop-indicator {
+  position: absolute;
+  top: 4px;
+  bottom: 4px;
+  width: 2px;
+  background: #1f6feb;
+  border-radius: 1px;
+  pointer-events: none;
+  opacity: 0;
+  transition: opacity 0.1s ease;
+}
+
+#tab-drop-indicator.show {
+  opacity: 1;
 }
 
 .tab-dot {
