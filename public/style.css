@@ -469,6 +469,11 @@ header h1 {
 
 .log-line.stdin {
   color: #79c0ff;
+  background: rgba(56, 139, 253, 0.1);
+  border-left: 2px solid #388bfd;
+  padding-left: 6px;
+  margin: 1px 0;
+  border-radius: 2px;
 }
 
 /* ── Input Row ─────────────────────────────────────── */

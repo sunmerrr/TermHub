@@ -59,11 +59,12 @@ window.addEventListener('resize', sendResize);
 document.addEventListener('keydown', e => {
   if (!activeTab) return;
 
-  if (e.altKey && !e.ctrlKey && !e.metaKey && !e.shiftKey && e.code === 'BracketLeft') {
+  const inInput = e.target.tagName === 'INPUT' || e.target.tagName === 'TEXTAREA';
+  if (!inInput && e.metaKey && e.shiftKey && !e.ctrlKey && !e.altKey && e.key === 'ArrowLeft') {
     e.preventDefault();
     switchTab(-1);
     return;
-  } else if (e.altKey && !e.ctrlKey && !e.metaKey && !e.shiftKey && e.code === 'BracketRight') {
+  } else if (!inInput && e.metaKey && e.shiftKey && !e.ctrlKey && !e.altKey && e.key === 'ArrowRight') {
     e.preventDefault();
     switchTab(1);
     return;
