@@ -10,14 +10,13 @@ tmux를 활용한 멀티 터미널 세션 웹 대시보드. Claude, Gemini, GPT 
 - **AI 상태 감지** — 터미널 출력을 분석하여 AI 상태를 자동 감지:
   - 🔵 작업 중 → 🟢 대기 → 🟡 결정 필요 (권한 요청)
 - **양방향 미러링** — 대시보드와 로컬 터미널에서 동일 세션을 동시에 확인
-- **Tab / Split 레이아웃** — Tab으로 집중, Split으로 나란히 보기
 
 ### 부가 기능
 
-- **즐겨찾기 & 최근 경로** — 자주 사용하는 디렉토리 빠른 접근
 - **tmux 세션 스캔** — 기존 세션 자동 감지 및 연결
-- **스마트 스크롤** — 히스토리 확인 시 자동 스크롤 멈춤, 맨 아래로 돌아가면 재개
-- **비밀번호 인증 + ngrok** — 모바일 등 외부 기기에서 안전하게 접근
+- **Tab / Split 레이아웃** — Tab으로 집중, Split으로 나란히 보기
+- **즐겨찾기 & 최근 경로** — 자주 사용하는 디렉토리 빠른 접근
+- **비밀번호 인증 + 외부 터널** — Cloudflare(권장) 또는 ngrok으로 외부 접근
 - **적응형 터미널 크기** — 화면에 맞게 tmux 자동 리사이즈
 - **키보드 단축키** — Esc, Shift+Tab, Ctrl+C, 방향키를 활성 워커에 전달
 
@@ -25,7 +24,8 @@ tmux를 활용한 멀티 터미널 세션 웹 대시보드. Claude, Gemini, GPT 
 
 - [Node.js](https://nodejs.org)
 - [tmux](https://github.com/tmux/tmux) (`brew install tmux`)
-- [ngrok](https://ngrok.com) (선택사항, 외부 접근용 — `brew install ngrok`)
+- [cloudflared](https://developers.cloudflare.com/cloudflare-one/connections/connect-networks/downloads/) (선택사항, 외부 접근용 — 권장)
+- [ngrok](https://ngrok.com) (선택사항, 외부 접근용)
 
 ## 빠른 설치
 
@@ -59,21 +59,55 @@ cat /tmp/termhub.log                                                # 로그 확
 ```bash
 npm install
 cp config.example.json config.json   # basePath, favorites, defaultCommand 수정
-echo -e "PORT=8080\nDASHBOARD_PASSWORD=yourpass" > .env
+echo -e "PORT=8081\nDASHBOARD_PASSWORD=yourpass" > .env
 node server.js
 ```
 
-## 외부 접근 (ngrok)
+launchd 없이 수동으로 실행하려면:
 
-로컬 네트워크 외부(모바일, 다른 PC 등)에서 TermHub에 접근하려면 [ngrok](https://ngrok.com)을 사용하세요.
+```bash
+node server.js                                        # 서버 시작
+cloudflared tunnel --url http://localhost:8081         # 터널 시작 (선택, 별도 프로세스)
+```
 
-### 1. ngrok 설치
+## 외부 접근 (Cloudflare / ngrok)
+
+로컬 네트워크 외부(모바일, 다른 PC 등)에서 TermHub에 접근할 때는 터널 도구를 사용하세요.
+
+> **권장:** Cloudflare Tunnel (`cloudflared`)  
+> 이유: 계정/도메인 없이도 빠르게 임시 URL(`*.trycloudflare.com`)을 열 수 있고, 설정이 간단합니다.
+
+### 옵션 A. Cloudflare (권장)
+
+1. 설치
+
+```bash
+brew install cloudflared
+```
+
+2. 끝 — TermHub가 서버 시작 시 자동으로 Cloudflare 터널을 실행합니다. 터널 URL은:
+
+- 서버 로그에 출력 (`☁️  Tunnel URL → https://...`)
+- API로 조회 가능: `GET /api/tunnel`
+- WebSocket으로 연결된 클라이언트에 브로드캐스트
+
+3. (선택) **Discord 알림** — `.env`에 webhook URL을 추가하면 서버 시작 시 터널 URL이 Discord로 전송됩니다:
+
+```env
+DISCORD_WEBHOOK=https://discord.com/api/webhooks/your/webhook-url
+```
+
+> **참고:** `trycloudflare.com` URL은 임시 주소입니다. 재시작할 때마다 바뀝니다.
+
+### 옵션 B. ngrok
+
+1. 설치
 
 ```bash
 brew install ngrok
 ```
 
-### 2. 계정 연결
+2. 계정 연결
 
 [ngrok 대시보드](https://dashboard.ngrok.com)에서 무료 계정을 생성한 후 authtoken을 등록하세요:
 
@@ -81,23 +115,17 @@ brew install ngrok
 ngrok config add-authtoken <your-token>
 ```
 
-### 3. 터널 시작
+3. 터널 시작
 
 ```bash
-ngrok http 8080
+ngrok http 8081
 ```
 
-다음과 같은 포워딩 URL이 표시됩니다:
+4. 접속
 
-```
-Forwarding  https://xxxx-xxxx.ngrok-free.app -> http://localhost:8080
-```
+출력에 표시되는 URL(예: `https://xxxx-xxxx.ngrok-free.app`)을 브라우저에서 열면 됩니다.
 
-### 4. 접속
-
-브라우저에서 `https://xxxx-xxxx.ngrok-free.app` URL을 열면 됩니다. `.env`에 `DASHBOARD_PASSWORD`가 설정되어 있으면 로그인 화면이 표시됩니다.
-
-> **참고:** 무료 플랜은 ngrok을 시작할 때마다 새로운 URL이 생성됩니다. 고정 도메인을 사용하려면 `ngrok http --url=your-domain.ngrok-free.app 8080`으로 실행하세요.
+> **참고:** 무료 플랜은 ngrok을 시작할 때마다 새로운 URL이 생성됩니다. 고정 도메인을 사용하려면 `ngrok http --url=your-domain.ngrok-free.app 8081`으로 실행하세요.
 
 ## 사용법
 

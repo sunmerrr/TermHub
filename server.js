@@ -1,12 +1,13 @@
 require("dotenv").config();
 const http = require("http");
-const { execSync } = require("child_process");
+const { execSync, spawn } = require("child_process");
 const fs = require("fs");
 const path = require("path");
 const { WebSocketServer } = require("ws");
 
-const PORT = process.env.PORT || 8080;
+const PORT = process.env.PORT || 8081;
 const PASSWORD = process.env.DASHBOARD_PASSWORD || "changeme";
+const DISCORD_WEBHOOK = process.env.DISCORD_WEBHOOK;
 
 if (PASSWORD === "changeme") {
   console.warn("⚠️  Using default password. Please set DASHBOARD_PASSWORD environment variable.");
@@ -15,6 +16,8 @@ if (PASSWORD === "changeme") {
 const sessions = new Map();
 const workers = new Map();
 let nextId = 1;
+let tunnelUrl = null;
+let tunnelProcess = null;
 
 function createToken() {
   return Math.random().toString(36).slice(2) + Date.now().toString(36);
@@ -44,7 +47,8 @@ function spawnWorker(cwd, cmd) {
   cmd = cmd || config.defaultCommand || "claude";
   const id = String(nextId++);
   const sessionName = "term-" + id;
-  tmux(`new-session -d -s ${sessionName} -c "${cwd}" "${cmd}"`);
+  tmux(`new-session -d -s ${sessionName} -c "${cwd}"`);
+  tmux(`send-keys -t ${sessionName} ${JSON.stringify(cmd)} Enter`);
   const logs = [];
   workers.set(id, { sessionName, cwd, cmd, logs });
   const pollTimer = setInterval(() => pollOutput(id), 1000);
@@ -297,6 +301,10 @@ const server = http.createServer(async (req, res) => {
     return json(res, 200, { ok: false });
   }
 
+  if (method === "GET" && url === "/api/tunnel") {
+    return json(res, 200, { url: tunnelUrl });
+  }
+
   if (method === "POST" && url === "/api/kill") {
     const { id } = JSON.parse(await readBody(req));
     killWorker(id);
@@ -349,9 +357,54 @@ function recoverSessions() {
   }
 }
 
+function startTunnel() {
+  try {
+    execSync("which cloudflared", { stdio: "pipe" });
+  } catch {
+    console.log("☁️  cloudflared not found — skipping tunnel");
+    return;
+  }
+  tunnelProcess = spawn("cloudflared", ["tunnel", "--url", `http://localhost:${PORT}`], {
+    stdio: ["ignore", "pipe", "pipe"],
+  });
+  const handleData = (data) => {
+    const text = data.toString();
+    const match = text.match(/https:\/\/[^\s]+\.trycloudflare\.com/);
+    if (match && !tunnelUrl) {
+      tunnelUrl = match[0];
+      console.log(`☁️  Tunnel URL → ${tunnelUrl}`);
+      broadcast({ type: "tunnel", url: tunnelUrl });
+      if (DISCORD_WEBHOOK) {
+        fetch(DISCORD_WEBHOOK, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ content: `☁️ TermHub → ${tunnelUrl}` }),
+        }).catch(() => {});
+      }
+    }
+  };
+  tunnelProcess.stdout.on("data", handleData);
+  tunnelProcess.stderr.on("data", handleData);
+  tunnelProcess.on("close", (code) => {
+    console.log(`☁️  cloudflared exited (code ${code})`);
+    tunnelUrl = null;
+    tunnelProcess = null;
+  });
+}
+
 server.listen(PORT, () => {
   recoverSessions();
   console.log(`✅ TermHub running → http://localhost:${PORT}`);
   console.log(`🔑 Password: ${PASSWORD}`);
   console.log(`📺 View tmux session: tmux attach -t term-1`);
+  startTunnel();
+});
+
+process.on("SIGINT", () => {
+  if (tunnelProcess) tunnelProcess.kill();
+  process.exit();
+});
+process.on("SIGTERM", () => {
+  if (tunnelProcess) tunnelProcess.kill();
+  process.exit();
 });

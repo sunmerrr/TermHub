@@ -12,14 +12,13 @@ A web dashboard for managing multiple terminal sessions via tmux. Run any comman
 - **AI state detection** — automatically detects AI CLI state from terminal output:
   - 🔵 Working → 🟢 Idle → 🟡 Waiting (permission needed)
 - **Two-way mirroring** — view the same session from both the dashboard and your local terminal
-- **Tab / Split layout** — Tab mode for focus, Split mode for side-by-side
 
 ### More
 
-- **Favorites & recent paths** — quick access to frequently used directories
 - **tmux session scanning** — auto-detect and attach to existing sessions
-- **Smart scroll** — auto-scroll pauses when viewing history, resumes at bottom
-- **Password auth + ngrok** — secure external access from mobile or other devices
+- **Tab / Split layout** — Tab mode for focus, Split mode for side-by-side
+- **Favorites & recent paths** — quick access to frequently used directories
+- **Password auth + external tunnels** — Cloudflare (recommended) or ngrok for remote access
 - **Adaptive terminal size** — tmux resizes to match your screen
 - **Keyboard shortcuts** — Esc, Shift+Tab, Ctrl+C, arrow keys forwarded to active worker
 
@@ -27,7 +26,8 @@ A web dashboard for managing multiple terminal sessions via tmux. Run any comman
 
 - [Node.js](https://nodejs.org)
 - [tmux](https://github.com/tmux/tmux) (`brew install tmux`)
-- [ngrok](https://ngrok.com) (optional, for external access — `brew install ngrok`)
+- [cloudflared](https://developers.cloudflare.com/cloudflare-one/connections/connect-networks/downloads/) (optional, for external access — recommended)
+- [ngrok](https://ngrok.com) (optional, for external access)
 
 ## Quick Setup
 
@@ -61,21 +61,55 @@ If you prefer to set up manually instead of using the setup script:
 ```bash
 npm install
 cp config.example.json config.json   # Edit basePath, favorites, defaultCommand
-echo -e "PORT=8080\nDASHBOARD_PASSWORD=yourpass" > .env
+echo -e "PORT=8081\nDASHBOARD_PASSWORD=yourpass" > .env
 node server.js
 ```
 
-## External Access (ngrok)
+To run each component manually (without launchd):
 
-To access TermHub from outside your local network (mobile, another PC, etc.), use [ngrok](https://ngrok.com).
+```bash
+node server.js                                        # Start server
+cloudflared tunnel --url http://localhost:8081         # Start tunnel (optional, separate process)
+```
 
-### 1. Install ngrok
+## External Access (Cloudflare / ngrok)
+
+To access TermHub from outside your local network (mobile, another PC, etc.), use a tunnel tool.
+
+> **Recommended:** Cloudflare Tunnel (`cloudflared`)  
+> Why: it is fast to set up and can expose an temporary `*.trycloudflare.com` URL without account/domain setup.
+
+### Option A. Cloudflare (Recommended)
+
+1. Install
+
+```bash
+brew install cloudflared
+```
+
+2. That's it — TermHub automatically starts a Cloudflare tunnel on launch. The tunnel URL is:
+
+- Printed in the server log (`☁️  Tunnel URL → https://...`)
+- Available via API: `GET /api/tunnel`
+- Broadcast to connected clients via WebSocket
+
+3. (Optional) **Discord notification** — add a webhook URL to `.env` to receive the tunnel URL on Discord whenever the server starts:
+
+```env
+DISCORD_WEBHOOK=https://discord.com/api/webhooks/your/webhook-url
+```
+
+> **Note:** `trycloudflare.com` URLs are temporary. They change on every restart.
+
+### Option B. ngrok
+
+1. Install
 
 ```bash
 brew install ngrok
 ```
 
-### 2. Connect your account
+2. Connect your account
 
 Create a free account at the [ngrok dashboard](https://dashboard.ngrok.com), then register your authtoken:
 
@@ -83,23 +117,17 @@ Create a free account at the [ngrok dashboard](https://dashboard.ngrok.com), the
 ngrok config add-authtoken <your-token>
 ```
 
-### 3. Start the tunnel
+3. Start the tunnel
 
 ```bash
-ngrok http 8080
+ngrok http 8081
 ```
 
-You'll see a forwarding URL like:
+4. Connect
 
-```
-Forwarding  https://xxxx-xxxx.ngrok-free.app -> http://localhost:8080
-```
+Open the URL shown in the output (for example, `https://xxxx-xxxx.ngrok-free.app`) in your browser.
 
-### 4. Connect
-
-Open the `https://xxxx-xxxx.ngrok-free.app` URL in your browser. If `DASHBOARD_PASSWORD` is set in `.env`, you'll see a login screen.
-
-> **Note:** The free plan generates a new URL each time you start ngrok. For a fixed domain, use `ngrok http --url=your-domain.ngrok-free.app 8080`.
+> **Note:** The free plan generates a new URL each time you start ngrok. For a fixed domain, use `ngrok http --url=your-domain.ngrok-free.app 8081`.
 
 ## Usage
 
