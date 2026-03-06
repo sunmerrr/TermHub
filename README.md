@@ -6,6 +6,12 @@ A web dashboard for managing multiple terminal sessions via tmux. Run any comman
 
 If you find it useful, feel free to give it a star on GitHub.
 
+## Project Status
+
+TermHub is actively developed and may contain bugs or rough edges.
+If you hit an issue, please open an issue with steps to reproduce.
+Contributions and bug reports are very welcome.
+
 ## Features
 
 - **Run any command** — spawn sessions with any CLI tool (default: `claude`)
