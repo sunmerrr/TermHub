@@ -60,6 +60,7 @@ document.addEventListener('keydown', e => {
   if (!activeTab) return;
 
   const inInput = e.target.tagName === 'INPUT' || e.target.tagName === 'TEXTAREA';
+  const hasSelection = !!(window.getSelection && window.getSelection().toString());
   if (!inInput && e.metaKey && e.shiftKey && !e.ctrlKey && !e.altKey && e.key === 'ArrowLeft') {
     e.preventDefault();
     switchTab(-1);
@@ -79,7 +80,8 @@ document.addEventListener('keydown', e => {
   } else if (e.key === 'Tab' && !e.shiftKey) {
     e.preventDefault();
     sendSpecialKey(activeTab, 'Tab');
-  } else if (e.key === 'c' && (e.ctrlKey || e.metaKey)) {
+  } else if (e.key.toLowerCase() === 'c' && e.ctrlKey && !e.metaKey && !e.shiftKey && !e.altKey) {
+    if (hasSelection) return;
     e.preventDefault();
     sendSpecialKey(activeTab, 'C-c');
   } else if (e.key === 'Enter' && !e.target.closest('.input-row') && !e.target.closest('.toolbar') && !e.target.closest('#login')) {

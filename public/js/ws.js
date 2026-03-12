@@ -17,9 +17,9 @@ function initWS() {
 }
 
 function handleMsg(d) {
-  if (d.type === 'spawned') ensureCard(d.id, d.cwd, d.status, [], d.cmd);
+  if (d.type === 'spawned') ensureCard(d.id, d.cwd, d.status, [], d.cmd, d.reason || null);
   if (d.type === 'log') appendLog(d.id, d.src, d.text);
-  if (d.type === 'status') updateStatus(d.id, d.status);
+  if (d.type === 'status') updateStatus(d.id, d.status, d.reason || null);
   if (d.type === 'cwd') updateCwd(d.id, d.cwd);
   if (d.type === 'aiState') updateAIState(d.id, d.state);
   if (d.type === 'snapshot') {
@@ -58,12 +58,15 @@ function measureChar(box) {
 
 function sendResize() {
   if (!ws || ws.readyState !== 1) return;
-  const box = document.querySelector('.logs');
+  const MIN_COLS = 8;
+  const MIN_ROWS = 4;
+  const box = Array.from(document.querySelectorAll('.logs'))
+    .find(el => el.clientWidth > 0 && el.clientHeight > 0 && el.getClientRects().length > 0);
   if (!box || !box.clientWidth) return;
   const ch = measureChar(box);
   if (!ch.w || !ch.h) return;
-  const cols = Math.floor((box.clientWidth - 16) / ch.w);
-  const rows = Math.floor(box.clientHeight / ch.h);
+  const cols = Math.max(MIN_COLS, Math.floor((box.clientWidth - 16) / ch.w));
+  const rows = Math.max(MIN_ROWS, Math.floor(box.clientHeight / ch.h));
   document.querySelectorAll('.tab').forEach(t => {
     ws.send(JSON.stringify({ type: 'resize', id: t.dataset.id, cols, rows }));
   });
@@ -87,7 +90,7 @@ function apiGet(url) {
 function loadAll() {
   apiGet('/api/workers')
     .then(list => list.forEach(w => {
-      ensureCard(w.id, w.cwd, w.status, w.logs, w.cmd);
+      ensureCard(w.id, w.cwd, w.status, w.logs, w.cmd, w.exitReason || null);
       if (w.aiState) updateAIState(w.id, w.aiState);
     }));
 }

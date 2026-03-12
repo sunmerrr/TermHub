@@ -46,7 +46,7 @@ function killBtnHtml(id, status) {
   return '<button class="kill-btn" id="kill-' + id + '">Stop</button>';
 }
 
-function ensureCard(id, cwd, status, logs, cmd) {
+function ensureCard(id, cwd, status, logs, cmd, reason) {
   if (document.getElementById('card-' + id)) return;
 
   const cmdLabel = cmd || 'claude';
@@ -60,6 +60,7 @@ function ensureCard(id, cwd, status, logs, cmd) {
       killBtnHtml(id, status) +
     '</div>' +
     '<div class="card-cwd">' + displayPath(cwd) + '</div>' +
+    '<div class="exit-reason" id="exit-reason-' + id + '"></div>' +
     '<div class="logs" id="logs-' + id + '"></div>' +
     '<div class="input-row" id="input-row-' + id + '"' + (status === 'stopped' || status === 'completed' ? ' style="display:none"' : '') + '>' +
       '<textarea id="inp-' + id + '" placeholder="Enter command..." rows="1"></textarea>' +
@@ -130,6 +131,8 @@ function ensureCard(id, cwd, status, logs, cmd) {
 
   renderTitle(id, cwd, cmdLabel);
   if (logs) logs.forEach(l => appendLog(id, l.src, l.text));
+  if (reason) updateExitReason(id, reason);
+  if (status === 'running') updateExitReason(id, null);
   setTimeout(sendResize, 100);
 }
 
@@ -216,7 +219,19 @@ function markPrompt(line, text) {
   line.appendChild(document.createTextNode(after));
 }
 
-function updateStatus(id, status) {
+function updateExitReason(id, reason) {
+  document.querySelectorAll('#exit-reason-' + id).forEach(el => {
+    if (reason) {
+      el.textContent = 'Exit reason: ' + reason;
+      el.style.display = 'block';
+    } else {
+      el.textContent = '';
+      el.style.display = 'none';
+    }
+  });
+}
+
+function updateStatus(id, status, reason) {
   var isStopped = status === 'stopped' || status === 'completed';
   document.querySelectorAll('#badge-' + id).forEach(el => {
     el.textContent = status;
@@ -226,6 +241,7 @@ function updateStatus(id, status) {
     el.className = 'tab-dot' + (status === 'stopped' ? ' stopped' : '') + (status === 'completed' ? ' completed' : '');
   });
   if (isStopped) {
+    updateExitReason(id, reason || 'Unknown');
     document.querySelectorAll('#kill-' + id).forEach(btn => {
       btn.textContent = 'Remove';
       btn.style.background = '#21262d';
@@ -245,6 +261,7 @@ function updateStatus(id, status) {
     document.querySelectorAll('#input-row-' + id).forEach(el => el.style.display = 'none');
   }
   if (status === 'running') {
+    updateExitReason(id, null);
     document.querySelectorAll('#kill-' + id).forEach(btn => {
       btn.textContent = 'Stop';
       btn.style.background = '';

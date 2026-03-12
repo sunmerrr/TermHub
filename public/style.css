@@ -405,6 +405,15 @@ header h1 {
   border-bottom: 1px solid #21262d;
 }
 
+.exit-reason {
+  display: none;
+  font-size: 11px;
+  color: #f2cc60;
+  padding: 4px 12px;
+  border-bottom: 1px solid #21262d;
+  background: #2f2400;
+}
+
 .badge {
   font-size: 11px;
   padding: 2px 7px;

@@ -12,6 +12,7 @@ function setLayout(mode) {
   document.getElementById('layout-tab-btn').classList.toggle('layout-active', mode === 'tab');
   document.getElementById('layout-split-btn').classList.toggle('layout-active', mode === 'split');
   updateSplitGrid();
+  setTimeout(sendResize, 50);
 }
 
 function updateSplitGrid() {
@@ -35,6 +36,7 @@ function selectTab(id) {
   activeTab = id;
   document.querySelectorAll('.tab').forEach(t => t.classList.toggle('active', t.dataset.id === id));
   document.querySelectorAll('.tab-panel').forEach(p => p.classList.toggle('active', p.dataset.id === id));
+  setTimeout(sendResize, 0);
 }
 
 function switchTab(delta) {

@@ -18,6 +18,8 @@ const workers = new Map();
 let nextId = 1;
 let tunnelUrl = null;
 let tunnelProcess = null;
+const ACTION_WINDOW_MS = 7000;
+const SHELL_COMMANDS = new Set(["bash", "zsh", "sh", "fish"]);
 
 function createToken() {
   return Math.random().toString(36).slice(2) + Date.now().toString(36);
@@ -42,6 +44,39 @@ function loadConfig() {
   return fs.existsSync(configPath) ? JSON.parse(fs.readFileSync(configPath, "utf8")) : {};
 }
 
+function getBaseCommand(cmd) {
+  if (!cmd) return "";
+  return String(cmd).trim().split(/\s+/)[0] || "";
+}
+
+function rememberAction(w, type, detail) {
+  w.lastAction = { type, detail, ts: Date.now() };
+}
+
+function recentAction(w) {
+  if (!w || !w.lastAction) return null;
+  if (Date.now() - w.lastAction.ts > ACTION_WINDOW_MS) return null;
+  return w.lastAction;
+}
+
+function inferExitReason(w, fallback) {
+  const action = recentAction(w);
+  if (action?.type === "stop_button") return "Stopped from dashboard (Stop button).";
+  if (action?.type === "special_key" && action.detail === "C-c") return "Interrupted by Ctrl+C sent from dashboard.";
+  if (action?.type === "special_key") return `Exited after key input from dashboard (${action.detail}).`;
+  if (w?.status === "completed" && w?.lastPaneCommand && w?.expectedCmd && w.lastPaneCommand !== w.expectedCmd) {
+    return `Command '${w.expectedCmd}' is no longer active (pane now '${w.lastPaneCommand}').`;
+  }
+  return fallback || "Session exited (reason unknown).";
+}
+
+function startPolling(id) {
+  const w = workers.get(id);
+  if (!w) return;
+  if (w.pollTimer) clearInterval(w.pollTimer);
+  w.pollTimer = setInterval(() => pollOutput(id), 1000);
+}
+
 function spawnWorker(cwd, cmd) {
   const config = loadConfig();
   cmd = cmd || config.defaultCommand || "claude";
@@ -50,9 +85,19 @@ function spawnWorker(cwd, cmd) {
   tmux(`new-session -d -s ${sessionName} -c "${cwd}" -e CLAUDECODE=`);
   tmux(`send-keys -t ${sessionName} ${JSON.stringify(cmd)} Enter`);
   const logs = [];
-  workers.set(id, { sessionName, cwd, cmd, logs });
-  const pollTimer = setInterval(() => pollOutput(id), 1000);
-  workers.get(id).pollTimer = pollTimer;
+  workers.set(id, {
+    sessionName,
+    cwd,
+    cmd,
+    logs,
+    status: "running",
+    expectedCmd: getBaseCommand(cmd),
+    seenExpectedCmd: false,
+    exitReason: null,
+    lastPaneCommand: null,
+    lastAction: null,
+  });
+  startPolling(id);
   broadcast({ type: "spawned", id, cwd, cmd, status: "running", sessionName });
   return id;
 }
@@ -78,10 +123,12 @@ function pollOutput(id) {
   const w = workers.get(id);
   if (!w) return;
   if (!isAlive(w.sessionName)) {
-    clearInterval(w.pollTimer);
+    if (w.pollTimer) clearInterval(w.pollTimer);
+    w.pollTimer = null;
     w.status = 'completed';
     w.aiState = null;
-    broadcast({ type: "status", id, status: "completed" });
+    w.exitReason = w.exitReason || inferExitReason(w, "tmux session ended or was killed externally.");
+    broadcast({ type: "status", id, status: "completed", reason: w.exitReason });
     return;
   }
   const cols = w.cols || 80;
@@ -94,6 +141,21 @@ function pollOutput(id) {
   if (currentCwd && currentCwd !== w.cwd) {
     w.cwd = currentCwd;
     broadcast({ type: "cwd", id, cwd: currentCwd });
+  }
+  const currentPaneCmd = tmux(`display-message -t ${w.sessionName} -p "#{pane_current_command}"`).trim();
+  if (currentPaneCmd) {
+    w.lastPaneCommand = currentPaneCmd;
+    if (w.expectedCmd && currentPaneCmd === w.expectedCmd) w.seenExpectedCmd = true;
+    const switchedToShell = w.seenExpectedCmd && currentPaneCmd !== w.expectedCmd && SHELL_COMMANDS.has(currentPaneCmd);
+    if (switchedToShell && w.status !== "completed") {
+      if (w.pollTimer) clearInterval(w.pollTimer);
+      w.pollTimer = null;
+      w.status = "completed";
+      w.aiState = null;
+      w.exitReason = inferExitReason(w, `Command '${w.expectedCmd}' exited and returned to shell '${currentPaneCmd}'.`);
+      broadcast({ type: "status", id, status: "completed", reason: w.exitReason });
+      return;
+    }
   }
 
   if (output === lastCapture[id]) {
@@ -130,23 +192,34 @@ function pollOutput(id) {
 function sendInput(id, text) {
   const w = workers.get(id);
   if (!w) return false;
+  if (w.status === "completed") {
+    w.status = "running";
+    w.aiState = null;
+    w.exitReason = null;
+    startPolling(id);
+    broadcast({ type: "status", id, status: "running", reason: null });
+  }
   const lines = text.split("\n");
   for (const line of lines) {
     tmux(`send-keys -t ${w.sessionName} "${line.replace(/"/g, '\\"')}" ""`);
     tmux(`send-keys -t ${w.sessionName} "" Enter`);
   }
+  rememberAction(w, "input", "text");
   broadcast({ type: "log", id, src: "stdin", text, ts: Date.now() });
   return true;
 }
 
-function killWorker(id) {
+function killWorker(id, reason) {
   const w = workers.get(id);
   if (!w) return false;
-  clearInterval(w.pollTimer);
+  if (w.pollTimer) clearInterval(w.pollTimer);
+  w.pollTimer = null;
+  rememberAction(w, "stop_button", "kill-session");
   tmux(`kill-session -t ${w.sessionName}`);
   w.status = 'stopped';
   w.aiState = null;
-  broadcast({ type: "status", id, status: "stopped" });
+  w.exitReason = reason || "Stopped from dashboard.";
+  broadcast({ type: "status", id, status: "stopped", reason: w.exitReason });
   return true;
 }
 
@@ -224,7 +297,14 @@ const server = http.createServer(async (req, res) => {
 
   if (method === "GET" && url === "/api/workers") {
     const list = [...workers.entries()].map(([id, w]) => ({
-      id, cwd: w.cwd, cmd: w.cmd || "claude", status: isAlive(w.sessionName) ? "running" : (w.status || "stopped"), sessionName: w.sessionName, logs: w.logs, aiState: w.aiState || null
+      id,
+      cwd: w.cwd,
+      cmd: w.cmd || "claude",
+      status: (w.status === "completed" || w.status === "stopped") ? w.status : (isAlive(w.sessionName) ? "running" : (w.status || "stopped")),
+      sessionName: w.sessionName,
+      logs: w.logs,
+      aiState: w.aiState || null,
+      exitReason: w.exitReason || null
     }));
     return json(res, 200, list);
   }
@@ -245,9 +325,18 @@ const server = http.createServer(async (req, res) => {
   if (method === "POST" && url === "/api/attach") {
     const { sessionName, cwd } = JSON.parse(await readBody(req));
     const id = String(nextId++);
-    workers.set(id, { sessionName, cwd, logs: [] });
-    const pollTimer = setInterval(() => pollOutput(id), 1000);
-    workers.get(id).pollTimer = pollTimer;
+    workers.set(id, {
+      sessionName,
+      cwd,
+      logs: [],
+      status: "running",
+      exitReason: null,
+      expectedCmd: "",
+      seenExpectedCmd: false,
+      lastPaneCommand: null,
+      lastAction: null,
+    });
+    startPolling(id);
     broadcast({ type: "spawned", id, cwd, status: "running", sessionName });
     return json(res, 200, { id });
   }
@@ -277,14 +366,27 @@ const server = http.createServer(async (req, res) => {
   if (method === "POST" && url === "/api/remove") {
     const { id } = JSON.parse(await readBody(req));
     const w = workers.get(id);
-    if (w) { clearInterval(w.pollTimer); workers.delete(id); }
+    if (w) {
+      if (w.pollTimer) clearInterval(w.pollTimer);
+      workers.delete(id);
+    }
     return json(res, 200, { ok: true });
   }
 
   if (method === "POST" && url === "/api/key") {
     const { id, key } = JSON.parse(await readBody(req));
     const w = workers.get(id);
-    if (w) tmux(`send-keys -t ${w.sessionName} ${key}`);
+    if (w) {
+      if (w.status === "completed") {
+        w.status = "running";
+        w.aiState = null;
+        w.exitReason = null;
+        startPolling(id);
+        broadcast({ type: "status", id, status: "running", reason: null });
+      }
+      rememberAction(w, "special_key", key);
+      tmux(`send-keys -t ${w.sessionName} ${key}`);
+    }
     return json(res, 200, { ok: true });
   }
 
@@ -293,9 +395,13 @@ const server = http.createServer(async (req, res) => {
     const w = workers.get(id);
     if (!w) return json(res, 404, { ok: false });
     if (isAlive(w.sessionName)) {
-      clearInterval(w.pollTimer);
-      w.pollTimer = setInterval(() => pollOutput(id), 1000);
-      broadcast({ type: "status", id, status: "running" });
+      if (w.pollTimer) clearInterval(w.pollTimer);
+      w.status = "running";
+      w.aiState = null;
+      w.exitReason = null;
+      w.seenExpectedCmd = false;
+      startPolling(id);
+      broadcast({ type: "status", id, status: "running", reason: null });
       return json(res, 200, { ok: true });
     }
     return json(res, 200, { ok: false });
@@ -307,7 +413,7 @@ const server = http.createServer(async (req, res) => {
 
   if (method === "POST" && url === "/api/kill") {
     const { id } = JSON.parse(await readBody(req));
-    killWorker(id);
+    killWorker(id, "Stopped from dashboard (Stop button).");
     return json(res, 200, { ok: true });
   }
 
@@ -321,7 +427,15 @@ wss.on('connection', ws => {
     try {
       const msg = JSON.parse(raw);
       if (msg.type === 'resize') {
-        clientSizes.set(ws, { cols: msg.cols, rows: msg.rows });
+        const size = { cols: msg.cols, rows: msg.rows };
+        clientSizes.set(ws, size);
+        if (msg.id && workers.has(String(msg.id))) {
+          const w = workers.get(String(msg.id));
+          w.cols = size.cols;
+          w.rows = size.rows;
+        } else {
+          workers.forEach(w => { w.cols = size.cols; w.rows = size.rows; });
+        }
       }
       if (msg.type === 'active') {
         const size = clientSizes.get(ws);
@@ -347,9 +461,19 @@ function recoverSessions() {
     const numId = parseInt(id);
     if (isNaN(numId)) continue;
     if (workers.has(id)) continue;
-    workers.set(id, { sessionName, cwd, cmd, logs: [] });
-    const pollTimer = setInterval(() => pollOutput(id), 1000);
-    workers.get(id).pollTimer = pollTimer;
+    workers.set(id, {
+      sessionName,
+      cwd,
+      cmd,
+      logs: [],
+      status: "running",
+      expectedCmd: getBaseCommand(cmd),
+      seenExpectedCmd: false,
+      exitReason: null,
+      lastPaneCommand: null,
+      lastAction: null,
+    });
+    startPolling(id);
     if (numId >= nextId) nextId = numId + 1;
   }
   if (workers.size > 0) {
