@@ -65,8 +65,13 @@ function sendResize() {
   if (!box || !box.clientWidth) return;
   const ch = measureChar(box);
   if (!ch.w || !ch.h) return;
-  const cols = Math.max(MIN_COLS, Math.floor((box.clientWidth - 16) / ch.w));
-  const rows = Math.max(MIN_ROWS, Math.floor(box.clientHeight / ch.h));
+  const style = getComputedStyle(box);
+  const padX = (parseFloat(style.paddingLeft) || 0) + (parseFloat(style.paddingRight) || 0);
+  const padY = (parseFloat(style.paddingTop) || 0) + (parseFloat(style.paddingBottom) || 0);
+  const innerW = Math.max(0, box.clientWidth - padX);
+  const innerH = Math.max(0, box.clientHeight - padY);
+  const cols = Math.max(MIN_COLS, Math.floor(innerW / ch.w));
+  const rows = Math.max(MIN_ROWS, Math.floor(innerH / ch.h));
   document.querySelectorAll('.tab').forEach(t => {
     ws.send(JSON.stringify({ type: 'resize', id: t.dataset.id, cols, rows }));
   });

@@ -8,6 +8,7 @@ const { WebSocketServer } = require("ws");
 const PORT = process.env.PORT || 8081;
 const PASSWORD = process.env.DASHBOARD_PASSWORD || "changeme";
 const DISCORD_WEBHOOK = process.env.DISCORD_WEBHOOK;
+const DISCORD_ALERT_WEBHOOK = process.env.DISCORD_ALERT_WEBHOOK;
 
 if (PASSWORD === "changeme") {
   console.warn("⚠️  Using default password. Please set DASHBOARD_PASSWORD environment variable.");
@@ -20,6 +21,8 @@ let tunnelUrl = null;
 let tunnelProcess = null;
 const ACTION_WINDOW_MS = 7000;
 const SHELL_COMMANDS = new Set(["bash", "zsh", "sh", "fish"]);
+const ALERT_COOLDOWN_MS = 60000; // 60s cooldown per worker
+const lastAlertTime = new Map(); // key: worker id, value: timestamp
 
 function createToken() {
   return Math.random().toString(36).slice(2) + Date.now().toString(36);
@@ -115,6 +118,40 @@ function detectWaiting(output) {
   return false;
 }
 
+function sendWaitingAlert(id) {
+  if (!DISCORD_ALERT_WEBHOOK) return;
+
+  const now = Date.now();
+  const lastTime = lastAlertTime.get(id) || 0;
+  if (now - lastTime < ALERT_COOLDOWN_MS) return; // still in cooldown
+
+  const w = workers.get(id);
+  if (!w) return;
+
+  lastAlertTime.set(id, now);
+
+  const embed = {
+    embeds: [{
+      title: "⏳ Waiting — Worker #" + id,
+      color: 0xf0ad4e,
+      fields: [
+        { name: "Command", value: w.cmd || "unknown", inline: true },
+        { name: "Directory", value: w.cwd || "unknown", inline: true },
+        { name: "Session", value: w.sessionName || "unknown", inline: true },
+      ],
+      timestamp: new Date().toISOString(),
+    }],
+  };
+
+  fetch(DISCORD_ALERT_WEBHOOK, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(embed),
+  }).catch((err) => {
+    console.error("Discord alert failed:", err.message);
+  });
+}
+
 const IDLE_THRESHOLD = 5000; // 5 seconds of no output change → idle
 
 let lastCapture = {};
@@ -133,6 +170,7 @@ function pollOutput(id) {
   }
   const cols = w.cols || 80;
   const rows = w.rows || 50;
+  tmux(`resize-pane -t ${w.sessionName} -x ${cols} -y ${rows}`);
   tmux(`resize-window -t ${w.sessionName} -x ${cols} -y ${rows}`);
   const output = tmux(`capture-pane -t ${w.sessionName} -p -S -500 -J`);
 
@@ -168,6 +206,7 @@ function pollOutput(id) {
         if (newState !== w.aiState) {
           w.aiState = newState;
           broadcast({ type: "aiState", id, state: newState });
+          if (newState === 'waiting') sendWaitingAlert(id);
         }
       }
     }
@@ -186,6 +225,7 @@ function pollOutput(id) {
   if (aiState !== w.aiState) {
     w.aiState = aiState;
     broadcast({ type: "aiState", id, state: aiState });
+    if (aiState === 'waiting') sendWaitingAlert(id);
   }
 }
 
@@ -369,6 +409,7 @@ const server = http.createServer(async (req, res) => {
     if (w) {
       if (w.pollTimer) clearInterval(w.pollTimer);
       workers.delete(id);
+      lastAlertTime.delete(id);
     }
     return json(res, 200, { ok: true });
   }
