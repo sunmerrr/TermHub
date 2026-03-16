@@ -42,7 +42,7 @@ Contributions and bug reports are very welcome.
 Run the setup script to install dependencies, create config files, and register TermHub as a background service:
 
 ```bash
-git clone https://github.com/yourname/termhub.git
+git clone https://github.com/sunmerrr/TermHub.git
 cd termhub
 npm run setup
 ```
