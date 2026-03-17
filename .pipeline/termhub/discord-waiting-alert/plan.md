@@ -6,9 +6,9 @@
 - depends: none
 - files: .env
 
-`.env` 파일에 `DISCORD_ALERT_WEBHOOK` 환경변수를 추가한다. 값은 사용자가 제공한 Discord alert 채널 웹훅 URL이다:
+`.env` 파일에 `DISCORD_ALERT_WEBHOOK` 환경변수를 추가한다. 값은 Discord alert 채널 웹훅 URL이다:
 ```
-DISCORD_ALERT_WEBHOOK=https://discord.com/api/webhooks/1482981560579002462/mVVaUpn5d3Ivh9Bdwes8o_skPuaE0xTi1fdYC7yUU6BP4jifrrSGzlQmRiAXbDr1xxyd
+DISCORD_ALERT_WEBHOOK=<your-discord-webhook-url>
 ```
 기존 `DISCORD_WEBHOOK`(터널 알림용)은 그대로 유지하고, 새 변수를 별도 줄에 추가한다.
 

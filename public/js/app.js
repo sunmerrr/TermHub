@@ -95,5 +95,17 @@ document.addEventListener('keydown', e => {
     if (e.target.closest('.input-row')) return;
     e.preventDefault();
     sendSpecialKey(activeTab, 'Down');
+  } else if (!inInput && !e.ctrlKey && !e.metaKey && !e.altKey) {
+    // 입력 필드 밖에서 일반 키 입력 시 터미널로 직접 전달
+    if (e.key === 'Backspace') {
+      e.preventDefault();
+      sendSpecialKey(activeTab, 'BSpace');
+    } else if (e.key === ' ') {
+      e.preventDefault();
+      sendSpecialKey(activeTab, 'Space');
+    } else if (e.key.length === 1) {
+      e.preventDefault();
+      sendSpecialKey(activeTab, e.key);
+    }
   }
 });
