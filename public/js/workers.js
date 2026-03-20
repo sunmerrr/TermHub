@@ -302,7 +302,7 @@ function updateAIState(id, state) {
 
 function removeWorker(id) {
   apiPost('/api/remove', { id });
-
+  removePreviewTabs(id);
   const panel = document.querySelector('.tab-panel[data-id="' + id + '"]');
   if (panel) panel.remove();
   const tab = document.querySelector('.tab[data-id="' + id + '"]');

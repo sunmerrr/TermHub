@@ -22,6 +22,8 @@ function handleMsg(d) {
   if (d.type === 'status') updateStatus(d.id, d.status, d.reason || null);
   if (d.type === 'cwd') updateCwd(d.id, d.cwd);
   if (d.type === 'aiState') updateAIState(d.id, d.state);
+  if (d.type === 'preview_detected') ensurePreview(d.workerId, d.port);
+  if (d.type === 'preview_tunnel') updatePreviewTunnel(d.port, d.url);
   if (d.type === 'snapshot') {
     document.querySelectorAll('#logs-' + d.id).forEach(box => {
       var wasAtBottom = isNearBottom(box);

@@ -1,5 +1,6 @@
 require("dotenv").config();
 const http = require("http");
+const net = require("net");
 const { execSync, spawn } = require("child_process");
 const fs = require("fs");
 const path = require("path");
@@ -8,7 +9,18 @@ const { WebSocketServer } = require("ws");
 const PORT = process.env.PORT || 8081;
 const PASSWORD = process.env.DASHBOARD_PASSWORD || "changeme";
 const DISCORD_WEBHOOK = process.env.DISCORD_WEBHOOK;
+const ENABLE_TUNNEL_HEALTHCHECK = process.env.ENABLE_TUNNEL_HEALTHCHECK === "1";
 const DISCORD_ALERT_WEBHOOK = process.env.DISCORD_ALERT_WEBHOOK;
+const ALERT_WEBHOOK = DISCORD_ALERT_WEBHOOK || DISCORD_WEBHOOK;
+const ENABLE_PREVIEW = process.env.ENABLE_PREVIEW === "1";
+const PREVIEW_TUNNEL = process.env.PREVIEW_TUNNEL === "1";
+
+// workerId(문자열) → Set<number> : 워커별 감지된 포트 목록
+const detectedPorts = new Map();
+// port(number) → { process, url } : 포트별 cloudflared 터널 상태
+const previewTunnels = new Map();
+// localhost 포트 감지 정규식
+const PORT_PATTERN = /(?:https?:\/\/)?(?:localhost|127\.0\.0\.1):(\d{2,5})/g;
 
 if (PASSWORD === "changeme") {
   console.warn("⚠️  Using default password. Please set DASHBOARD_PASSWORD environment variable.");
@@ -19,10 +31,12 @@ const workers = new Map();
 let nextId = 1;
 let tunnelUrl = null;
 let tunnelProcess = null;
+let tunnelHealthFailures = 0;
+let cachedTunnelUrl = null;
 const ACTION_WINDOW_MS = 7000;
 const SHELL_COMMANDS = new Set(["bash", "zsh", "sh", "fish"]);
-const ALERT_COOLDOWN_MS = 60000; // 60s cooldown per worker
-const lastAlertTime = new Map(); // key: worker id, value: timestamp
+const issueAlertTime = new Map(); // key: alert key, value: timestamp
+const ISSUE_ALERT_COOLDOWN_MS = 120000; // 120s cooldown per issue key
 
 function createToken() {
   return Math.random().toString(36).slice(2) + Date.now().toString(36);
@@ -73,6 +87,80 @@ function inferExitReason(w, fallback) {
   return fallback || "Session exited (reason unknown).";
 }
 
+// DB·인프라 서비스의 대표 포트 — 미리보기 대상에서 제외 (false positive 방지)
+const EXCLUDED_PORTS = new Set([
+  3306,  // MySQL
+  5432,  // PostgreSQL
+  5433,  // PostgreSQL (alt)
+  27017, // MongoDB
+  27018, 27019,
+  6379,  // Redis
+  6380,
+  5672,  // RabbitMQ
+  15672, // RabbitMQ management
+  9200,  // Elasticsearch
+  9300,
+  2181,  // ZooKeeper
+  2375,  // Docker daemon
+  2376,
+]);
+
+function checkPortListening(port) {
+  function tryConnect(host) {
+    return new Promise((resolve) => {
+      const sock = new net.Socket();
+      sock.setTimeout(500);
+      sock.once("connect", () => { sock.destroy(); resolve(true); });
+      sock.once("error", () => resolve(false));
+      sock.once("timeout", () => { sock.destroy(); resolve(false); });
+      sock.connect(port, host);
+    });
+  }
+  // IPv4 먼저, 실패하면 IPv6
+  return tryConnect("127.0.0.1").then((ok) => ok ? true : tryConnect("::1"));
+}
+
+// 포트 감지됐지만 아직 리스닝 확인 안 된 포트 (워커별)
+const pendingPorts = new Map(); // id → Set<port>
+
+function detectPorts(id, output) {
+  if (!ENABLE_PREVIEW) return;
+  const matches = [...output.matchAll(PORT_PATTERN)];
+  if (!matches.length && (!pendingPorts.has(id) || !pendingPorts.get(id).size)) return;
+
+  if (!detectedPorts.has(id)) detectedPorts.set(id, new Set());
+  if (!pendingPorts.has(id)) pendingPorts.set(id, new Set());
+  const portSet = detectedPorts.get(id);
+  const pending = pendingPorts.get(id);
+
+  // 새로 감지된 포트를 pending에 추가
+  for (const m of matches) {
+    const port = parseInt(m[1], 10);
+    if (port < 1024 || port > 65535) continue;
+    if (port === Number(PORT)) continue;
+    if (EXCLUDED_PORTS.has(port)) continue;
+    if (portSet.has(port)) continue;
+    pending.add(port);
+  }
+
+  // pending 포트들의 리스닝 여부 확인
+  // 호출 직전에 pending에서 제거해 다음 pollOutput 주기에서 중복 checkPortListening 방지
+  for (const port of [...pending]) {
+    pending.delete(port);
+    checkPortListening(port).then((listening) => {
+      if (!listening) {
+        // 아직 리스닝 안 됨 — 다음 주기에 재시도하도록 pending에 복귀
+        pending.add(port);
+        return;
+      }
+      if (portSet.has(port)) return;
+      portSet.add(port);
+      broadcast({ type: "preview_detected", workerId: id, port });
+      if (PREVIEW_TUNNEL) startPreviewTunnel(port);
+    });
+  }
+}
+
 function startPolling(id) {
   const w = workers.get(id);
   if (!w) return;
@@ -118,37 +206,48 @@ function detectWaiting(output) {
   return false;
 }
 
-function sendWaitingAlert(id) {
-  if (!DISCORD_ALERT_WEBHOOK) return;
-
+function sendIssueAlert({ key, title, description, color = 0xf0ad4e, fields = [] }) {
+  if (!ALERT_WEBHOOK) return;
   const now = Date.now();
-  const lastTime = lastAlertTime.get(id) || 0;
-  if (now - lastTime < ALERT_COOLDOWN_MS) return; // still in cooldown
-
-  const w = workers.get(id);
-  if (!w) return;
-
-  lastAlertTime.set(id, now);
+  const lastTime = issueAlertTime.get(key) || 0;
+  if (now - lastTime < ISSUE_ALERT_COOLDOWN_MS) return;
+  issueAlertTime.set(key, now);
 
   const embed = {
     embeds: [{
-      title: "⏳ Waiting — Worker #" + id,
-      color: 0xf0ad4e,
-      fields: [
-        { name: "Command", value: w.cmd || "unknown", inline: true },
-        { name: "Directory", value: w.cwd || "unknown", inline: true },
-        { name: "Session", value: w.sessionName || "unknown", inline: true },
-      ],
+      title,
+      description,
+      color,
+      fields,
       timestamp: new Date().toISOString(),
     }],
   };
 
-  fetch(DISCORD_ALERT_WEBHOOK, {
+  fetch(ALERT_WEBHOOK, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify(embed),
   }).catch((err) => {
     console.error("Discord alert failed:", err.message);
+  });
+}
+
+function sendWaitingAlert(id) {
+  const w = workers.get(id);
+  if (!w) return;
+
+  // 쿨다운은 sendIssueAlert의 ISSUE_ALERT_COOLDOWN_MS(120초)에서 일괄 관리
+  sendIssueAlert({
+    key: `worker-waiting-${id}`,
+    title: `⏳ Waiting — Worker #${id}`,
+    description: "Worker requires user action/approval.",
+    color: 0xf0ad4e,
+    fields: [
+      { name: "Issue", value: "AI session is waiting for input/approval.", inline: false },
+      { name: "Command", value: w.cmd || "unknown", inline: true },
+      { name: "Directory", value: w.cwd || "unknown", inline: true },
+      { name: "Session", value: w.sessionName || "unknown", inline: true },
+    ],
   });
 }
 
@@ -197,7 +296,9 @@ function pollOutput(id) {
   }
 
   if (output === lastCapture[id]) {
-    // Output unchanged — check if idle threshold reached
+    // Output unchanged — 대기 중인 포트 재시도
+    detectPorts(id, output);
+    // check if idle threshold reached
     if (w.aiState !== 'idle' && w.aiState !== 'waiting' && w.lastChangeTime) {
       const elapsed = Date.now() - w.lastChangeTime;
       if (elapsed >= IDLE_THRESHOLD) {
@@ -214,6 +315,7 @@ function pollOutput(id) {
   }
 
   lastCapture[id] = output;
+  detectPorts(id, output);
   w.lastChangeTime = Date.now();
   const lines = output.split("\n");
   w.logs = lines.slice(-200).map(text => ({ src: "stdout", text, ts: Date.now() }));
@@ -408,8 +510,10 @@ const server = http.createServer(async (req, res) => {
     const w = workers.get(id);
     if (w) {
       if (w.pollTimer) clearInterval(w.pollTimer);
+      cleanupPreviewPorts(id);
+      // 워커 관련 alert 쿨다운 키 정리 (issueAlertTime 무한 누적 방지)
+      issueAlertTime.delete(`worker-waiting-${id}`);
       workers.delete(id);
-      lastAlertTime.delete(id);
     }
     return json(res, 200, { ok: true });
   }
@@ -485,6 +589,22 @@ wss.on('connection', ws => {
     } catch (e) {}
   });
   ws.on('close', () => clientSizes.delete(ws));
+
+  // 새 클라이언트에게 기존 미리보기 상태 동기화
+  if (ws.readyState === 1) {
+    // 이미 감지된 포트 전송
+    detectedPorts.forEach((portSet, workerId) => {
+      portSet.forEach(port => {
+        ws.send(JSON.stringify({ type: "preview_detected", workerId, port }));
+      });
+    });
+    // 이미 생성된 터널 URL 전송
+    previewTunnels.forEach((tunnel, port) => {
+      if (tunnel.url) {
+        ws.send(JSON.stringify({ type: "preview_tunnel", port, url: tunnel.url }));
+      }
+    });
+  }
 });
 
 
@@ -527,6 +647,13 @@ function startTunnel() {
     execSync("which cloudflared", { stdio: "pipe" });
   } catch {
     console.log("☁️  cloudflared not found — skipping tunnel");
+    sendIssueAlert({
+      key: "tunnel-cloudflared-missing",
+      title: "🚨 Tunnel Unavailable",
+      description: "cloudflared is not installed, so external tunnel cannot start.",
+      color: 0xe74c3c,
+      fields: [{ name: "Issue", value: "cloudflared not found in PATH", inline: false }],
+    });
     return;
   }
   tunnelProcess = spawn("cloudflared", ["tunnel", "--url", `http://localhost:${PORT}`], {
@@ -534,10 +661,20 @@ function startTunnel() {
   });
   const handleData = (data) => {
     const text = data.toString();
-    const match = text.match(/https:\/\/[^\s]+\.trycloudflare\.com/);
-    if (match && !tunnelUrl) {
-      tunnelUrl = match[0];
-      console.log(`☁️  Tunnel URL → ${tunnelUrl}`);
+    const matches = [...text.matchAll(/https:\/\/([a-z0-9-]+)\.trycloudflare\.com/gi)];
+    const valid = matches.find((m) => m[1] && m[1].toLowerCase() !== "api");
+    if (valid) {
+      const nextUrl = valid[0];
+      if (cachedTunnelUrl === nextUrl) return;
+      const changed = cachedTunnelUrl && cachedTunnelUrl !== nextUrl;
+      cachedTunnelUrl = nextUrl;
+      tunnelUrl = nextUrl;
+      tunnelHealthFailures = 0;
+      if (changed) {
+        console.log(`☁️  Tunnel URL changed → ${tunnelUrl}`);
+      } else {
+        console.log(`☁️  Tunnel URL → ${tunnelUrl}`);
+      }
       broadcast({ type: "tunnel", url: tunnelUrl });
       if (DISCORD_WEBHOOK) {
         fetch(DISCORD_WEBHOOK, {
@@ -552,19 +689,117 @@ function startTunnel() {
   tunnelProcess.stderr.on("data", handleData);
   tunnelProcess.on("close", (code) => {
     console.log(`☁️  cloudflared exited (code ${code}), restarting in 5s...`);
+    sendIssueAlert({
+      key: `tunnel-exit-${code}`,
+      title: "⚠️ Tunnel Restarted",
+      description: `cloudflared exited with code ${code}. Restarting in 5 seconds.`,
+      color: code === 0 ? 0xf39c12 : 0xe67e22,
+      fields: [
+        { name: "Issue", value: "Tunnel process exited unexpectedly.", inline: false },
+        { name: "Exit Code", value: String(code), inline: true },
+        { name: "Last URL", value: tunnelUrl || cachedTunnelUrl || "unknown", inline: true },
+      ],
+    });
     tunnelUrl = null;
+    cachedTunnelUrl = null;
     tunnelProcess = null;
+    tunnelHealthFailures = 0;
     setTimeout(startTunnel, 5000);
   });
 }
 
+function startPreviewTunnel(port) {
+  // 이미 해당 포트의 터널이 존재하면 중복 생성 방지
+  if (previewTunnels.has(port)) return;
+
+  try {
+    execSync("which cloudflared", { stdio: "pipe" });
+  } catch {
+    console.log(`☁️  cloudflared not found — cannot start preview tunnel for port ${port}`);
+    return;
+  }
+
+  console.log(`☁️  Starting preview tunnel for port ${port}...`);
+  const proc = spawn("cloudflared", ["tunnel", "--url", `http://localhost:${port}`], {
+    stdio: ["ignore", "pipe", "pipe"],
+  });
+
+  // 터널 생성 즉시 Map에 등록 (중복 스폰 방지)
+  previewTunnels.set(port, { process: proc, url: null });
+
+  const handleData = (data) => {
+    const text = data.toString();
+    const matches = [...text.matchAll(/https:\/\/([a-z0-9-]+)\.trycloudflare\.com/gi)];
+    const valid = matches.find((m) => m[1] && m[1].toLowerCase() !== "api");
+    if (valid) {
+      const url = valid[0];
+      const entry = previewTunnels.get(port);
+      if (entry && entry.url !== url) {
+        entry.url = url;
+        console.log(`☁️  Preview tunnel port ${port} → ${url}`);
+        broadcast({ type: "preview_tunnel", port, url });
+      }
+    }
+  };
+
+  proc.stdout.on("data", handleData);
+  proc.stderr.on("data", handleData);
+  proc.on("close", () => {
+    previewTunnels.delete(port);
+  });
+}
+
+function cleanupPreviewPorts(workerId) {
+  const portSet = detectedPorts.get(workerId);
+  if (!portSet) return;
+
+  for (const port of portSet) {
+    // 해당 포트를 다른 워커가 사용 중인지 확인
+    let usedByOther = false;
+    for (const [wid, pset] of detectedPorts) {
+      if (wid !== workerId && pset.has(port)) {
+        usedByOther = true;
+        break;
+      }
+    }
+    if (!usedByOther) {
+      const tunnel = previewTunnels.get(port);
+      if (tunnel) {
+        tunnel.process.kill();
+        previewTunnels.delete(port);
+      }
+    }
+  }
+
+  detectedPorts.delete(workerId);
+  pendingPorts.delete(workerId);
+}
+
 function checkTunnel() {
-  if (!tunnelUrl) return;
-  fetch(tunnelUrl, { signal: AbortSignal.timeout(10000) })
-    .then(r => { if (!r.ok) throw new Error(r.status); })
+  if (!cachedTunnelUrl || !tunnelProcess) return;
+  fetch(cachedTunnelUrl, { signal: AbortSignal.timeout(10000), cache: "no-store" })
+    .then(r => {
+      if (!r.ok) throw new Error(r.status);
+      tunnelHealthFailures = 0;
+    })
     .catch(() => {
-      console.log("☁️  Tunnel health check failed, restarting...");
-      if (tunnelProcess) tunnelProcess.kill();
+      tunnelHealthFailures += 1;
+      console.log(`☁️  Tunnel health check failed (${tunnelHealthFailures}/5)`);
+      if (tunnelHealthFailures >= 5) {
+        console.log("☁️  Tunnel health check threshold reached, restarting...");
+        sendIssueAlert({
+          key: "tunnel-healthcheck-threshold",
+          title: "🚨 Tunnel Healthcheck Failure",
+          description: "5 consecutive tunnel health checks failed. Restarting cloudflared.",
+          color: 0xe74c3c,
+          fields: [
+            { name: "Issue", value: "Tunnel endpoint repeatedly unreachable.", inline: false },
+            { name: "Tunnel URL", value: cachedTunnelUrl || "unknown", inline: false },
+          ],
+        });
+        tunnelHealthFailures = 0;
+        if (tunnelProcess) tunnelProcess.kill();
+      }
     });
 }
 
@@ -574,14 +809,20 @@ server.listen(PORT, () => {
   console.log(`🔑 Password: ${PASSWORD}`);
   console.log(`📺 View tmux session: tmux attach -t term-1`);
   startTunnel();
-  setInterval(checkTunnel, 60000);
+  if (ENABLE_TUNNEL_HEALTHCHECK) {
+    setInterval(checkTunnel, 60000);
+  } else {
+    console.log("☁️  Tunnel health check disabled (set ENABLE_TUNNEL_HEALTHCHECK=1 to enable)");
+  }
 });
 
 process.on("SIGINT", () => {
   if (tunnelProcess) tunnelProcess.kill();
+  previewTunnels.forEach(t => t.process.kill());
   process.exit();
 });
 process.on("SIGTERM", () => {
   if (tunnelProcess) tunnelProcess.kill();
+  previewTunnels.forEach(t => t.process.kill());
   process.exit();
 });

@@ -627,6 +627,190 @@ header h1 {
   transform: translateY(1px);
 }
 
+/* ── Preview Tab ───────────────────────────────────── */
+
+/* 미리보기 탭 구분: 일반 터미널 탭과 시각적으로 구분 */
+.tab[data-preview="true"] .tab-label::before {
+  content: "⬡ ";
+  font-size: 10px;
+  opacity: 0.7;
+}
+
+/* 미리보기 상태 도트 — 파란색 계열로 구분 */
+.tab-dot.preview-dot {
+  background: #58a6ff;
+}
+.preview-close {
+  margin-left: 6px;
+  font-size: 11px;
+  color: #666;
+  cursor: pointer;
+  padding: 0 3px;
+  border-radius: 3px;
+}
+.preview-close:hover {
+  color: #fff;
+  background: #c33;
+}
+
+/* 패널 레이아웃 — iframe이 전체 영역 차지 */
+.preview-panel {
+  display: none;
+  flex-direction: column;
+  height: 100%;
+  padding: 0;
+  overflow: hidden;
+}
+
+.preview-panel.active {
+  display: flex;
+}
+
+/* iframe 상단 툴바 */
+.preview-toolbar {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 4px 8px;
+  background: #161b22;
+  border-bottom: 1px solid #30363d;
+  flex-shrink: 0;
+}
+
+.preview-url {
+  flex: 1;
+  font-size: 12px;
+  color: #8b949e;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-family: "SF Mono", monospace;
+}
+
+.preview-btn {
+  background: #21262d;
+  border: 1px solid #30363d;
+  border-radius: 5px;
+  color: #8b949e;
+  font-size: 11px;
+  padding: 3px 8px;
+  cursor: pointer;
+  white-space: nowrap;
+  text-decoration: none;
+  display: inline-flex;
+  align-items: center;
+}
+
+.preview-btn:hover {
+  background: #30363d;
+  color: #e6edf3;
+}
+
+/* iframe 자체 */
+.preview-iframe {
+  flex: 1;
+  width: 100%;
+  border: none;
+  background: #0d1117;
+  min-height: 0;
+}
+
+/* iframe 로드 실패 폴백 */
+.preview-error {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  flex: 1;
+  gap: 12px;
+  color: #8b949e;
+  font-size: 14px;
+}
+
+.preview-error a {
+  color: #58a6ff;
+  text-decoration: none;
+}
+
+.preview-error a:hover {
+  text-decoration: underline;
+}
+
+/* ── Split Preview (PC 좌우 분할 뷰) ───────────────── */
+
+/* 분할 모드 활성화: tab-panel을 좌우 배치로 전환 */
+.tab-panel.has-preview {
+  flex-direction: row;
+}
+
+/* 터미널 영역: 왼쪽 */
+.tab-panel.has-preview > .card {
+  flex: none;
+  width: 50%;
+  min-width: 100px;
+}
+
+/* 리사이즈 핸들: 터미널과 미리보기 사이 드래그 바 */
+.split-resize-handle {
+  width: 5px;
+  cursor: col-resize;
+  background: #30363d;
+  flex-shrink: 0;
+  transition: background 0.15s;
+  position: relative;
+}
+.split-resize-handle:hover,
+.split-resize-handle.dragging {
+  background: #58a6ff;
+}
+
+/* 미리보기 영역: 오른쪽 절반 */
+.split-preview {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  border-left: none;
+  min-width: 100px;
+}
+
+/* split-preview 내 toolbar — 기존 preview-toolbar 스타일 상속 */
+.split-preview .preview-toolbar {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 4px 8px;
+  background: #161b22;
+  border-bottom: 1px solid #30363d;
+  flex-shrink: 0;
+}
+
+/* split-preview 내 iframe */
+.split-preview .preview-iframe {
+  flex: 1;
+  width: 100%;
+  border: none;
+  background: #0d1117;
+  min-height: 0;
+}
+
+/* 닫기 버튼 — preview-close와 유사 */
+.split-preview-close {
+  margin-left: 4px;
+  font-size: 11px;
+  color: #666;
+  cursor: pointer;
+  padding: 2px 5px;
+  border-radius: 3px;
+  background: none;
+  border: none;
+  flex-shrink: 0;
+}
+
+.split-preview-close:hover {
+  color: #fff;
+  background: #c33;
+}
+
 /* ── Login ─────────────────────────────────────────── */
 
 #login {
@@ -710,5 +894,26 @@ header h1 {
   .dir-item span {
     white-space: normal;
     word-break: break-all;
+  }
+
+  .preview-toolbar {
+    padding: 2px 4px;
+    font-size: 12px;
+    gap: 4px;
+  }
+
+  .preview-btn {
+    font-size: 10px;
+    padding: 2px 6px;
+  }
+
+  /* 모바일: 분할 뷰 숨김 — 별도 탭 방식 유지 */
+  .split-preview {
+    display: none;
+  }
+
+  /* 분할 뷰 숨겨도 터미널 카드는 세로 배치 복원 */
+  .tab-panel.has-preview {
+    flex-direction: column;
   }
 }
