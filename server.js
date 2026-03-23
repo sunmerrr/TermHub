@@ -782,19 +782,24 @@ function checkTunnel() {
       if (!r.ok) throw new Error(r.status);
       tunnelHealthFailures = 0;
     })
-    .catch(() => {
+    .catch((err) => {
       tunnelHealthFailures += 1;
-      console.log(`☁️  Tunnel health check failed (${tunnelHealthFailures}/5)`);
+      const reason = err?.cause?.code || err?.code || err?.message || String(err);
+      console.log(`☁️  Tunnel health check failed (${tunnelHealthFailures}/5): ${reason}`);
       if (tunnelHealthFailures >= 5) {
         console.log("☁️  Tunnel health check threshold reached, restarting...");
+        const processAlive = tunnelProcess && !tunnelProcess.killed && tunnelProcess.exitCode === null;
+        const uptimeMin = Math.floor(process.uptime() / 60);
         sendIssueAlert({
           key: "tunnel-healthcheck-threshold",
           title: "🚨 Tunnel Healthcheck Failure",
           description: "5 consecutive tunnel health checks failed. Restarting cloudflared.",
           color: 0xe74c3c,
           fields: [
-            { name: "Issue", value: "Tunnel endpoint repeatedly unreachable.", inline: false },
+            { name: "Error", value: reason, inline: false },
             { name: "Tunnel URL", value: cachedTunnelUrl || "unknown", inline: false },
+            { name: "cloudflared alive", value: processAlive ? "Yes" : "No", inline: true },
+            { name: "Server uptime", value: `${uptimeMin}m`, inline: true },
           ],
         });
         tunnelHealthFailures = 0;
