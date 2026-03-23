@@ -811,6 +811,63 @@ header h1 {
   background: #c33;
 }
 
+/* ── Preview Prompt Toast ─────────────────────────────── */
+
+.preview-prompt {
+  position: fixed;
+  bottom: 20px;
+  right: 20px;
+  background: #161b22;
+  border: 1px solid #30363d;
+  border-radius: 8px;
+  padding: 12px 16px;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  z-index: 9999;
+  box-shadow: 0 4px 16px rgba(0,0,0,0.4);
+  animation: slideUp 0.3s ease-out;
+}
+
+@keyframes slideUp {
+  from { transform: translateY(20px); opacity: 0; }
+  to { transform: translateY(0); opacity: 1; }
+}
+
+.preview-prompt-text {
+  font-size: 13px;
+  color: #e6edf3;
+}
+
+.preview-prompt-btn {
+  border: none;
+  border-radius: 5px;
+  font-size: 12px;
+  padding: 5px 12px;
+  cursor: pointer;
+  font-weight: 500;
+}
+
+.preview-prompt-open {
+  background: #238636;
+  color: #fff;
+}
+
+.preview-prompt-open:hover {
+  background: #2ea043;
+}
+
+.preview-prompt-dismiss {
+  background: #21262d;
+  color: #8b949e;
+  border: 1px solid #30363d;
+}
+
+.preview-prompt-dismiss:hover {
+  background: #30363d;
+  color: #e6edf3;
+}
+
 /* ── Login ─────────────────────────────────────────── */
 
 #login {

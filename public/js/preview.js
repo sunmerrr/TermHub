@@ -310,3 +310,39 @@ function initSplitResize(handle, panel) {
     setTimeout(sendResize, 50);
   }
 }
+
+// ── Preview Prompt (비-HTML 포트 감지 시 사용자 선택) ──
+
+function showPreviewPrompt(workerId, port, contentType) {
+  // 이미 미리보기가 있으면 무시
+  var tabId = 'preview-' + workerId + '-' + port;
+  if (previewTabs.has(tabId)) return;
+
+  // 이미 같은 포트의 프롬프트가 있으면 무시
+  if (document.getElementById('preview-prompt-' + tabId)) return;
+
+  var toast = document.createElement('div');
+  toast.className = 'preview-prompt';
+  toast.id = 'preview-prompt-' + tabId;
+
+  toast.innerHTML =
+    '<span class="preview-prompt-text">' +
+      '포트 <b>:' + port + '</b> 감지 (' + (contentType || 'unknown') + ')' +
+    '</span>' +
+    '<button class="preview-prompt-btn preview-prompt-open">미리보기</button>' +
+    '<button class="preview-prompt-btn preview-prompt-dismiss">무시</button>';
+
+  toast.querySelector('.preview-prompt-open').addEventListener('click', function() {
+    toast.remove();
+    ensurePreview(workerId, port);
+  });
+
+  toast.querySelector('.preview-prompt-dismiss').addEventListener('click', function() {
+    toast.remove();
+  });
+
+  // 30초 후 자동 사라짐
+  setTimeout(function() { if (toast.parentNode) toast.remove(); }, 30000);
+
+  document.body.appendChild(toast);
+}

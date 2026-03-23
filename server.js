@@ -120,6 +120,19 @@ function checkPortListening(port) {
   return tryConnect("127.0.0.1").then((ok) => ok ? true : tryConnect("::1"));
 }
 
+// Content-Type 체크: HTML이면 프론트엔드로 판단
+function checkContentType(port) {
+  return new Promise((resolve) => {
+    const req = http.get({ hostname: "127.0.0.1", port, path: "/", timeout: 2000 }, (res) => {
+      const ct = (res.headers["content-type"] || "").toLowerCase();
+      res.resume(); // 응답 body 소비 (메모리 누수 방지)
+      resolve(ct.includes("text/html") ? "html" : ct || "unknown");
+    });
+    req.on("error", () => resolve("error"));
+    req.on("timeout", () => { req.destroy(); resolve("timeout"); });
+  });
+}
+
 // 포트 감지됐지만 아직 리스닝 확인 안 된 포트 (워커별)
 const pendingPorts = new Map(); // id → Set<port>
 
@@ -144,19 +157,25 @@ function detectPorts(id, output) {
   }
 
   // pending 포트들의 리스닝 여부 확인
-  // 호출 직전에 pending에서 제거해 다음 pollOutput 주기에서 중복 checkPortListening 방지
   for (const port of [...pending]) {
     pending.delete(port);
     checkPortListening(port).then((listening) => {
       if (!listening) {
-        // 아직 리스닝 안 됨 — 다음 주기에 재시도하도록 pending에 복귀
         pending.add(port);
         return;
       }
       if (portSet.has(port)) return;
       portSet.add(port);
-      broadcast({ type: "preview_detected", workerId: id, port });
-      if (PREVIEW_TUNNEL) startPreviewTunnel(port);
+
+      // Content-Type 체크: HTML이면 자동 미리보기, 아니면 사용자 선택
+      checkContentType(port).then((ct) => {
+        if (ct === "html") {
+          broadcast({ type: "preview_detected", workerId: id, port });
+        } else {
+          broadcast({ type: "preview_prompt", workerId: id, port, contentType: ct });
+        }
+        if (PREVIEW_TUNNEL) startPreviewTunnel(port);
+      });
     });
   }
 }
