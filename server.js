@@ -609,12 +609,17 @@ wss.on('connection', ws => {
   });
   ws.on('close', () => clientSizes.delete(ws));
 
-  // 새 클라이언트에게 기존 미리보기 상태 동기화
+  // 새 클라이언트에게 기존 미리보기 상태 동기화 (리스닝 중인 포트만)
   if (ws.readyState === 1) {
-    // 이미 감지된 포트 전송
     detectedPorts.forEach((portSet, workerId) => {
       portSet.forEach(port => {
-        ws.send(JSON.stringify({ type: "preview_detected", workerId, port }));
+        checkPortListening(port).then(listening => {
+          if (listening) {
+            ws.send(JSON.stringify({ type: "preview_detected", workerId, port }));
+          } else {
+            portSet.delete(port);
+          }
+        });
       });
     });
     // 이미 생성된 터널 URL 전송
