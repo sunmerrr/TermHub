@@ -57,6 +57,7 @@ function ensureCard(id, cwd, status, logs, cmd, reason) {
     '<div class="card-header">' +
       '<span class="card-title" id="card-title-' + id + '">#' + id + ' ' + cmdLabel + ' · ' + (cwd.replace(/\/$/, '').split('/').pop() || cwd) + '</span>' +
       '<span class="badge' + (status === 'stopped' ? ' stopped' : '') + (status === 'completed' ? ' completed' : '') + '" id="badge-' + id + '">' + status + '</span>' +
+      '<button class="diff-btn" id="diff-' + id + '" title="Git Diff">Diff</button>' +
       killBtnHtml(id, status) +
     '</div>' +
     '<div class="card-cwd">' + displayPath(cwd) + '</div>' +
@@ -142,6 +143,9 @@ function bindCard(id, root) {
   const killBtn = q('#kill-' + id);
   const sendBtn = q('#send-' + id);
   const inp = q('#inp-' + id);
+
+  const diffBtn = q('#diff-' + id);
+  if (diffBtn) diffBtn.addEventListener('click', () => openGitDiff(id));
 
   if (killBtn) killBtn.addEventListener('click', () => killWorker(id));
   if (sendBtn) sendBtn.addEventListener('click', () => sendInput(id));
@@ -303,6 +307,8 @@ function updateAIState(id, state) {
 function removeWorker(id) {
   apiPost('/api/remove', { id });
   removePreviewTabs(id);
+  if (typeof closeGitDiff === 'function') closeGitDiff(id);
+
   const panel = document.querySelector('.tab-panel[data-id="' + id + '"]');
   if (panel) panel.remove();
   const tab = document.querySelector('.tab[data-id="' + id + '"]');

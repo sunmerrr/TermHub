@@ -1,7 +1,7 @@
 require("dotenv").config();
 const http = require("http");
 const net = require("net");
-const { execSync, spawn } = require("child_process");
+const { execSync, execFileSync, spawn } = require("child_process");
 const fs = require("fs");
 const path = require("path");
 const { WebSocketServer } = require("ws");
@@ -166,6 +166,11 @@ function detectPorts(id, output) {
       }
       if (portSet.has(port)) return;
       portSet.add(port);
+
+      // 다른 워커에서 이미 감지·브로드캐스트된 포트면 중복 전송하지 않음
+      for (const [wid, pset] of detectedPorts) {
+        if (wid !== id && pset.has(port)) return;
+      }
 
       // Content-Type 체크: HTML이면 자동 미리보기, 아니면 사용자 선택
       checkContentType(port).then((ct) => {
@@ -571,6 +576,60 @@ const server = http.createServer(async (req, res) => {
     return json(res, 200, { ok: false });
   }
 
+  if (method === "GET" && url === "/api/git-diff") {
+    const params = new URL(req.url, 'http://localhost').searchParams;
+    const workerId = params.get('id');
+    const file = params.get('file');
+
+    const w = workers.get(workerId);
+    if (!w) return json(res, 404, { error: 'worker not found' });
+
+    // path traversal 방지
+    if (file && file.includes('..')) return json(res, 400, { error: 'invalid file path' });
+
+    const cwd = w.cwd;
+
+    const execOpts = { encoding: 'utf8', maxBuffer: 10 * 1024 * 1024, stdio: 'pipe' };
+    try {
+      // git repo 확인
+      execFileSync('git', ['-C', cwd, 'rev-parse', '--is-inside-work-tree'], execOpts);
+
+      if (file) {
+        // 특정 파일의 diff — HEAD가 있으면 HEAD 대비, 없으면 워킹트리
+        let diff = '';
+        try {
+          diff = execFileSync('git', ['-C', cwd, '--no-color', 'diff', 'HEAD', '--', file], execOpts);
+        } catch (_) {
+          diff = execFileSync('git', ['-C', cwd, '--no-color', 'diff', '--', file], execOpts);
+        }
+        return json(res, 200, { diff });
+      } else {
+        // 파일 목록: git status --porcelain (untracked 포함)
+        const status = execFileSync('git', ['-C', cwd, 'status', '--porcelain'], execOpts);
+        const files = status.trim().split('\n').filter(Boolean).map(line => {
+          const xy = line.substring(0, 2).trim();
+          const filePath = line.substring(3);
+          // 상태 매핑: M=수정, A=추가, D=삭제, ?=untracked(신규), R=이름변경
+          let s = 'M';
+          if (xy === '??') s = 'A';
+          else if (xy.includes('D')) s = 'D';
+          else if (xy.includes('A')) s = 'A';
+          else if (xy.includes('R')) s = 'R';
+          return { status: s, path: filePath };
+        });
+
+        let stat = '';
+        try {
+          stat = execFileSync('git', ['-C', cwd, '--no-color', 'diff', '--stat', 'HEAD'], execOpts).trim();
+        } catch (_) { /* no HEAD yet */ }
+
+        return json(res, 200, { files, stat });
+      }
+    } catch (e) {
+      return json(res, 200, { files: [], diff: '', stat: '', error: e.message || 'not a git repo' });
+    }
+  }
+
   if (method === "GET" && url === "/api/tunnel") {
     return json(res, 200, { url: tunnelUrl });
   }
@@ -609,10 +668,13 @@ wss.on('connection', ws => {
   });
   ws.on('close', () => clientSizes.delete(ws));
 
-  // 새 클라이언트에게 기존 미리보기 상태 동기화 (리스닝 중인 포트만)
+  // 새 클라이언트에게 기존 미리보기 상태 동기화 (리스닝 중인 포트만, 포트 기준 중복 제거)
   if (ws.readyState === 1) {
+    const syncedPorts = new Set();
     detectedPorts.forEach((portSet, workerId) => {
       portSet.forEach(port => {
+        if (syncedPorts.has(port)) return;
+        syncedPorts.add(port);
         checkPortListening(port).then(listening => {
           if (listening) {
             ws.send(JSON.stringify({ type: "preview_detected", workerId, port }));

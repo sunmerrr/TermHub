@@ -96,9 +96,18 @@ function closeSplitPreview(workerId, tabId) {
   setTimeout(sendResize, 100);
 }
 
+// 같은 포트의 미리보기가 이미 열려 있는지 확인 (workerId 무관)
+function isPortPreviewed(port) {
+  for (const [, info] of previewTabs) {
+    if (info.port === port) return true;
+  }
+  return false;
+}
+
 // ── 진입점 라우터 ──
 // PC(768px+) + Tab 모드: 좌우 분할. 그 외: 별도 탭.
 function ensurePreview(workerId, port) {
+  if (isPortPreviewed(port)) return;
   if (isWideScreen() && typeof layout !== 'undefined' && layout === 'tab') {
     ensureSplitPreview(workerId, port);
   } else {
@@ -314,9 +323,9 @@ function initSplitResize(handle, panel) {
 // ── Preview Prompt (비-HTML 포트 감지 시 사용자 선택) ──
 
 function showPreviewPrompt(workerId, port, contentType) {
-  // 이미 미리보기가 있으면 무시
+  // 이미 같은 포트의 미리보기가 있으면 무시
+  if (isPortPreviewed(port)) return;
   var tabId = 'preview-' + workerId + '-' + port;
-  if (previewTabs.has(tabId)) return;
 
   // 이미 같은 포트의 프롬프트가 있으면 무시
   if (document.getElementById('preview-prompt-' + tabId)) return;
