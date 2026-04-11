@@ -11,6 +11,12 @@ function saveCustomTitles() {
   localStorage.setItem('tabTitles', JSON.stringify(customTitles));
 }
 
+function clearCustomTitle(id) {
+  if (!Object.prototype.hasOwnProperty.call(customTitles, id)) return;
+  delete customTitles[id];
+  saveCustomTitles();
+}
+
 function getTitleBase(id, cmd) {
   return customTitles[id] || cmd || 'claude';
 }
@@ -319,6 +325,7 @@ function updateAIState(id, state) {
 
 function removeWorker(id) {
   apiPost('/api/remove', { id });
+  clearCustomTitle(id);
   removePreviewTabs(id);
   if (typeof closeGitDiff === 'function') closeGitDiff(id);
 

@@ -116,6 +116,10 @@ function loadAll() {
   apiGet('/api/workers')
     .then(list => {
       if (!list) return;
+      const activeIds = new Set(list.map(w => String(w.id)));
+      Object.keys(customTitles).forEach(id => {
+        if (!activeIds.has(String(id))) clearCustomTitle(id);
+      });
       list.forEach(w => {
         ensureCard(w.id, w.cwd, w.status, w.logs, w.cmd, w.exitReason || null);
         if (w.aiState) updateAIState(w.id, w.aiState);
