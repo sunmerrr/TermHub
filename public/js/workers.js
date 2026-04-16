@@ -150,8 +150,21 @@ function bindCard(id, root) {
   if (killBtn) killBtn.addEventListener('click', () => killWorker(id));
   if (sendBtn) sendBtn.addEventListener('click', () => sendInput(id));
   if (inp) {
+    // IME 조합 중 Enter 누르면 마지막 글자가 중복되는 크롬 버그 회피:
+    // 조합 중일 때는 Enter를 IME 확정용으로 흘려보내고, compositionend에서 전송
+    let pendingEnter = false;
+    inp.addEventListener('compositionend', () => {
+      if (pendingEnter) {
+        pendingEnter = false;
+        if (inp.value.trim()) { sendInput(id); } else { sendSpecialKey(id, 'Enter'); }
+      }
+    });
     inp.addEventListener('keydown', e => {
       if (e.key === 'Enter' && !e.shiftKey) {
+        if (e.isComposing || e.keyCode === 229) {
+          pendingEnter = true;
+          return;
+        }
         e.preventDefault();
         if (inp.value.trim()) { sendInput(id); } else { sendSpecialKey(id, 'Enter'); }
       }
