@@ -1,6 +1,7 @@
 require("dotenv").config();
 const http = require("http");
 const net = require("net");
+const crypto = require("crypto");
 const { execSync, execFileSync, spawn } = require("child_process");
 const fs = require("fs");
 const path = require("path");
@@ -26,7 +27,6 @@ if (PASSWORD === "changeme") {
   console.warn("⚠️  Using default password. Please set DASHBOARD_PASSWORD environment variable.");
 }
 
-const sessions = new Map();
 const workers = new Map();
 let nextId = 1;
 let tunnelUrl = null;
@@ -38,9 +38,13 @@ const SHELL_COMMANDS = new Set(["bash", "zsh", "sh", "fish"]);
 const issueAlertTime = new Map(); // key: alert key, value: timestamp
 const ISSUE_ALERT_COOLDOWN_MS = 120000; // 120s cooldown per issue key
 
-function createToken() {
-  return Math.random().toString(36).slice(2) + Date.now().toString(36);
+// Deterministic token derived from password — survives server restarts.
+// Rotating PASSWORD invalidates all existing cookies.
+function expectedToken() {
+  return crypto.createHmac("sha256", PASSWORD).update("termhub-session-v1").digest("hex");
 }
+
+const SESSION_MAX_AGE = 60 * 60 * 24; // 1 day
 
 function isAlive(sessionName) {
   try {
@@ -412,7 +416,15 @@ function json(res, code, obj) {
 function auth(req) {
   const cookie = req.headers.cookie || "";
   const token = cookie.split(";").map(s => s.trim()).find(s => s.startsWith("token="))?.slice(6);
-  return token && sessions.has(token);
+  if (!token) return false;
+  const expected = expectedToken();
+  // timingSafeEqual은 길이가 같아야 함 — 다르면 즉시 false
+  if (token.length !== expected.length) return false;
+  try {
+    return crypto.timingSafeEqual(Buffer.from(token), Buffer.from(expected));
+  } catch {
+    return false;
+  }
 }
 
 const server = http.createServer(async (req, res) => {
@@ -427,9 +439,9 @@ const server = http.createServer(async (req, res) => {
   if (method === "POST" && url === "/api/login") {
     const body = JSON.parse(await readBody(req));
     if (body.pw === PASSWORD) {
-      const token = createToken();
-      sessions.set(token, true);
-      res.writeHead(200, { "Set-Cookie": `token=${token}; Path=/; HttpOnly`, "Content-Type": "application/json" });
+      const token = expectedToken();
+      const cookie = `token=${token}; Path=/; HttpOnly; SameSite=Lax; Max-Age=${SESSION_MAX_AGE}`;
+      res.writeHead(200, { "Set-Cookie": cookie, "Content-Type": "application/json" });
       return res.end(JSON.stringify({ ok: true }));
     }
     return json(res, 401, { ok: false });

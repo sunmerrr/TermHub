@@ -82,30 +82,51 @@ function sendResize() {
 
 // ── API Calls ──
 
+function showLogin() {
+  const loginEl = document.getElementById('login');
+  const appEl = document.getElementById('app');
+  if (loginEl) loginEl.style.display = 'flex';
+  if (appEl) appEl.style.display = 'none';
+}
+
 function apiPost(url, body) {
   return fetch(url, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify(body),
     credentials: 'include'
+  }).then(r => {
+    // 로그인 자체의 401은 비번 오류 — 호출자가 처리
+    if (r.status === 401 && url !== '/api/login') showLogin();
+    return r;
   });
 }
 
 function apiGet(url) {
-  return fetch(url, { credentials: 'include' }).then(r => r.json());
+  return fetch(url, { credentials: 'include' }).then(r => {
+    if (r.status === 401) {
+      showLogin();
+      return null;
+    }
+    return r.json();
+  });
 }
 
 function loadAll() {
   apiGet('/api/workers')
-    .then(list => list.forEach(w => {
-      ensureCard(w.id, w.cwd, w.status, w.logs, w.cmd, w.exitReason || null);
-      if (w.aiState) updateAIState(w.id, w.aiState);
-    }));
+    .then(list => {
+      if (!list) return;
+      list.forEach(w => {
+        ensureCard(w.id, w.cwd, w.status, w.logs, w.cmd, w.exitReason || null);
+        if (w.aiState) updateAIState(w.id, w.aiState);
+      });
+    });
 }
 
 function loadConfig() {
   apiGet('/api/config')
     .then(cfg => {
+      if (!cfg) return;
       if (cfg.basePath) window._basePath = cfg.basePath;
       if (cfg.favorites && !localStorage.getItem('fav')) {
         favorites = cfg.favorites;

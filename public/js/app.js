@@ -1,22 +1,31 @@
 // ── Init & Event Binding ──
 
+function enterApp() {
+  document.getElementById('login').style.display = 'none';
+  document.getElementById('app').style.display = 'flex';
+  loadConfig();
+  initWS();
+  loadAll();
+  setLayout(layout);
+}
+
 function doLogin() {
   const pw = document.getElementById('pw').value;
   apiPost('/api/login', { pw })
     .then(r => r.json())
     .then(d => {
       if (d.ok) {
-        document.getElementById('login').style.display = 'none';
-        document.getElementById('app').style.display = 'flex';
-        loadConfig();
-        initWS();
-        loadAll();
-        setLayout(layout);
+        enterApp();
       } else {
         document.getElementById('login-err').style.display = 'block';
       }
     });
 }
+
+// 기존 쿠키로 자동 로그인 시도 — 유효하면 로그인 화면 건너뜀
+fetch('/api/workers', { credentials: 'include' }).then(r => {
+  if (r.ok) enterApp();
+});
 
 // ── Toolbar Toggle ──
 

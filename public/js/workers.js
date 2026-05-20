@@ -390,8 +390,9 @@ function spawnSession() {
   var cwd = raw ? (raw.startsWith('/') ? raw : base + '/' + raw) : base;
   const cmd = document.getElementById('cmd-input').value.trim();
   apiPost('/api/spawn', { cwd, cmd })
-    .then(r => r.json().catch(() => ({})).then(d => ({ ok: r.ok, d })))
-    .then(({ ok, d }) => {
+    .then(r => r.json().catch(() => ({})).then(d => ({ ok: r.ok, status: r.status, d })))
+    .then(({ ok, status, d }) => {
+      if (status === 401) return; // 로그인 화면이 이미 표시됨
       if (!ok || d.ok === false) {
         alert(d.error || 'Invalid path. Worker not created.');
         return;
