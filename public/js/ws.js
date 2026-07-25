@@ -17,9 +17,10 @@ function initWS() {
 }
 
 function handleMsg(d) {
-  if (d.type === 'spawned') ensureCard(d.id, d.cwd, d.status, [], d.cmd, d.reason || null);
+  if (d.type === 'spawned') ensureCard(d.id, d.cwd, d.status, [], d.cmd, d.reason || null, d.title || '', d.sessionName || '');
   if (d.type === 'log') appendLog(d.id, d.src, d.text);
   if (d.type === 'status') updateStatus(d.id, d.status, d.reason || null);
+  if (d.type === 'title') updateTitle(d.id, d.title || '');
   if (d.type === 'cwd') updateCwd(d.id, d.cwd);
   if (d.type === 'aiState') updateAIState(d.id, d.state);
   if (d.type === 'preview_detected') ensurePreview(d.workerId, d.port);
@@ -121,7 +122,7 @@ function loadAll() {
         if (!activeIds.has(String(id))) clearCustomTitle(id);
       });
       list.forEach(w => {
-        ensureCard(w.id, w.cwd, w.status, w.logs, w.cmd, w.exitReason || null);
+        ensureCard(w.id, w.cwd, w.status, w.logs, w.cmd, w.exitReason || null, w.title || '', w.sessionName || '');
         if (w.aiState) updateAIState(w.id, w.aiState);
       });
     });

@@ -15,6 +15,8 @@ const DISCORD_ALERT_WEBHOOK = process.env.DISCORD_ALERT_WEBHOOK;
 const ALERT_WEBHOOK = DISCORD_ALERT_WEBHOOK || DISCORD_WEBHOOK;
 const ENABLE_PREVIEW = process.env.ENABLE_PREVIEW === "1";
 const PREVIEW_TUNNEL = process.env.PREVIEW_TUNNEL === "1";
+const CLAUDE_MIN_ROWS = Math.max(50, Number(process.env.CLAUDE_MIN_ROWS || 500));
+const STATE_PATH = path.join(__dirname, ".termhub-state.json");
 
 // workerId(문자열) → Set<number> : 워커별 감지된 포트 목록
 const detectedPorts = new Map();
@@ -65,9 +67,58 @@ function loadConfig() {
   return fs.existsSync(configPath) ? JSON.parse(fs.readFileSync(configPath, "utf8")) : {};
 }
 
+function loadState() {
+  try {
+    return fs.existsSync(STATE_PATH) ? JSON.parse(fs.readFileSync(STATE_PATH, "utf8")) : {};
+  } catch (e) {
+    return {};
+  }
+}
+
+function saveState(state) {
+  fs.writeFileSync(STATE_PATH, JSON.stringify(state, null, 2));
+}
+
+function getSessionTitle(sessionName) {
+  return loadState().titles?.[sessionName] || "";
+}
+
+function setSessionTitle(sessionName, title) {
+  const state = loadState();
+  state.titles = state.titles || {};
+  const trimmed = String(title || "").trim().slice(0, 80);
+  if (trimmed) state.titles[sessionName] = trimmed;
+  else delete state.titles[sessionName];
+  saveState(state);
+  return trimmed;
+}
+
 function getBaseCommand(cmd) {
   if (!cmd) return "";
   return String(cmd).trim().split(/\s+/)[0] || "";
+}
+
+function terminalRowsForWorker(w) {
+  const rows = w.rows || 50;
+  const baseCommand = getBaseCommand(w.cmd || w.expectedCmd);
+  if (baseCommand === "claude" || baseCommand.endsWith("/claude")) {
+    return Math.max(rows, CLAUDE_MIN_ROWS);
+  }
+  return rows;
+}
+
+function isClaudeWorker(w) {
+  const baseCommand = getBaseCommand(w?.cmd || w?.expectedCmd);
+  return baseCommand === "claude" || baseCommand.endsWith("/claude");
+}
+
+function displayOutputForWorker(w, output) {
+  if (!isClaudeWorker(w)) return output;
+  const lines = output.split("\n");
+  while (lines.length > 1 && lines[lines.length - 1].trim() === "") {
+    lines.pop();
+  }
+  return lines.join("\n");
 }
 
 function rememberAction(w, type, detail) {
@@ -203,6 +254,7 @@ function spawnWorker(cwd, cmd) {
   const sessionName = "term-" + id;
   tmux(`new-session -d -s ${sessionName} -c "${cwd}" -e CLAUDECODE=`);
   tmux(`send-keys -t ${sessionName} ${JSON.stringify(cmd)} Enter`);
+  setSessionTitle(sessionName, "");
   const logs = [];
   workers.set(id, {
     sessionName,
@@ -215,9 +267,10 @@ function spawnWorker(cwd, cmd) {
     exitReason: null,
     lastPaneCommand: null,
     lastAction: null,
+    title: "",
   });
   startPolling(id);
-  broadcast({ type: "spawned", id, cwd, cmd, status: "running", sessionName });
+  broadcast({ type: "spawned", id, cwd, cmd, status: "running", sessionName, title: "" });
   return id;
 }
 
@@ -296,10 +349,10 @@ function pollOutput(id) {
     return;
   }
   const cols = w.cols || 80;
-  const rows = w.rows || 50;
+  const rows = terminalRowsForWorker(w);
   tmux(`resize-pane -t ${w.sessionName} -x ${cols} -y ${rows}`);
   tmux(`resize-window -t ${w.sessionName} -x ${cols} -y ${rows}`);
-  const output = tmux(`capture-pane -t ${w.sessionName} -p -S -500 -J`);
+  const output = displayOutputForWorker(w, tmux(`capture-pane -t ${w.sessionName} -p -S -500 -J`));
 
   // Track actual working directory
   const currentCwd = tmux(`display-message -t ${w.sessionName} -p "#{pane_current_path}"`).trim();
@@ -480,6 +533,7 @@ const server = http.createServer(async (req, res) => {
       cmd: w.cmd || "claude",
       status: (w.status === "completed" || w.status === "stopped") ? w.status : (isAlive(w.sessionName) ? "running" : (w.status || "stopped")),
       sessionName: w.sessionName,
+      title: w.title || getSessionTitle(w.sessionName),
       logs: w.logs,
       aiState: w.aiState || null,
       exitReason: w.exitReason || null
@@ -513,9 +567,10 @@ const server = http.createServer(async (req, res) => {
       seenExpectedCmd: false,
       lastPaneCommand: null,
       lastAction: null,
+      title: getSessionTitle(sessionName),
     });
     startPolling(id);
-    broadcast({ type: "spawned", id, cwd, status: "running", sessionName });
+    broadcast({ type: "spawned", id, cwd, status: "running", sessionName, title: getSessionTitle(sessionName) });
     return json(res, 200, { id });
   }
 
@@ -535,6 +590,15 @@ const server = http.createServer(async (req, res) => {
     return json(res, 200, { ok: true, id });
   }
 
+  if (method === "POST" && url === "/api/title") {
+    const { id, title } = JSON.parse(await readBody(req));
+    const w = workers.get(String(id));
+    if (!w) return json(res, 404, { ok: false });
+    w.title = setSessionTitle(w.sessionName, title);
+    broadcast({ type: "title", id: String(id), title: w.title });
+    return json(res, 200, { ok: true, title: w.title });
+  }
+
   if (method === "POST" && url === "/api/input") {
     const { id, text } = JSON.parse(await readBody(req));
     const ok = sendInput(id, text);
@@ -547,6 +611,7 @@ const server = http.createServer(async (req, res) => {
     if (w) {
       if (w.pollTimer) clearInterval(w.pollTimer);
       cleanupPreviewPorts(id);
+      if (!isAlive(w.sessionName)) setSessionTitle(w.sessionName, "");
       // 워커 관련 alert 쿨다운 키 정리 (issueAlertTime 무한 누적 방지)
       issueAlertTime.delete(`worker-waiting-${id}`);
       workers.delete(id);
@@ -731,6 +796,7 @@ function recoverSessions() {
       exitReason: null,
       lastPaneCommand: null,
       lastAction: null,
+      title: getSessionTitle(sessionName),
     });
     startPolling(id);
     if (numId >= nextId) nextId = numId + 1;

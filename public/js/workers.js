@@ -1,14 +1,8 @@
 // ── Worker Card UI ──
 
 let customTitles = {};
-try {
-  customTitles = JSON.parse(localStorage.getItem('tabTitles') || '{}');
-} catch (e) {
-  customTitles = {};
-}
 
 function saveCustomTitles() {
-  localStorage.setItem('tabTitles', JSON.stringify(customTitles));
 }
 
 function clearCustomTitle(id) {
@@ -31,10 +25,11 @@ function renderTitle(id, cwd, cmd) {
   const tab = document.querySelector('.tab[data-id="' + id + '"]');
   const tabCwd = cwd || (tab && tab.dataset.cwd) || '';
   const tabCmd = cmd || (tab && tab.dataset.cmd) || 'claude';
+  const tabTitle = customTitles[id] || (tab && tab.dataset.title) || '';
   const folder = tabCwd.replace(/\/$/, '').split('/').pop() || tabCwd;
   let text = '';
-  if (customTitles[id]) {
-    text = '#' + id + ' ' + customTitles[id];
+  if (tabTitle) {
+    text = '#' + id + ' ' + tabTitle;
   } else {
     text = '#' + id + ' ' + tabCmd + ' · ' + folder;
   }
@@ -52,10 +47,11 @@ function killBtnHtml(id, status) {
   return '<button class="kill-btn" id="kill-' + id + '">Stop</button>';
 }
 
-function ensureCard(id, cwd, status, logs, cmd, reason) {
+function ensureCard(id, cwd, status, logs, cmd, reason, title, sessionName) {
   if (document.getElementById('card-' + id)) return;
 
   const cmdLabel = cmd || 'claude';
+  if (title) customTitles[id] = title;
   const card = document.createElement('div');
   card.className = 'card';
   card.id = 'card-' + id;
@@ -104,22 +100,27 @@ function ensureCard(id, cwd, status, logs, cmd, reason) {
   tab.dataset.id = id;
   tab.dataset.cwd = cwd;
   tab.dataset.cmd = cmdLabel;
+  tab.dataset.sessionName = sessionName || '';
+  tab.dataset.title = title || '';
   var folder = cwd.replace(/\/$/, '').split('/').pop() || cwd;
   tab.innerHTML = '<span class="tab-dot' + (status === 'stopped' ? ' stopped' : '') + (status === 'completed' ? ' completed' : '') + '" id="tab-dot-' + id + '"></span><span class="tab-label" id="tab-label-' + id + '">#' + id + ' ' + (cmd || 'claude') + ' · ' + folder + '</span>';
   tab.addEventListener('click', () => selectTab(id));
   tab.addEventListener('dblclick', e => {
     e.stopPropagation();
-    const current = customTitles[id] || cmdLabel;
+    const current = customTitles[id] || tab.dataset.title || cmdLabel;
     const next = prompt('Tab title', current);
     if (next === null) return;
     const trimmed = next.trim();
     if (!trimmed) {
       delete customTitles[id];
+      tab.dataset.title = '';
     } else {
       customTitles[id] = trimTitle(trimmed);
+      tab.dataset.title = customTitles[id];
     }
     saveCustomTitles();
     renderTitle(id);
+    apiPost('/api/title', { id, title: customTitles[id] || '' });
   });
   bindTabDrag(tab);
   document.getElementById('tab-bar').appendChild(tab);
@@ -357,6 +358,15 @@ function updateCwd(id, cwd) {
   const tab = document.querySelector('.tab[data-id="' + id + '"]');
   if (tab) tab.dataset.cwd = cwd;
   renderTitle(id, cwd);
+}
+
+function updateTitle(id, title) {
+  const tab = document.querySelector('.tab[data-id="' + id + '"]');
+  const trimmed = title || '';
+  if (trimmed) customTitles[id] = trimmed;
+  else delete customTitles[id];
+  if (tab) tab.dataset.title = trimmed;
+  renderTitle(id);
 }
 
 function reconnectWorker(id) {
