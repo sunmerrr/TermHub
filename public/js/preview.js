@@ -223,6 +223,18 @@ function closePreviewTab(tabId) {
   }
 }
 
+function closePreview(workerId, port) {
+  const tabId = 'preview-' + workerId + '-' + port;
+  const info = previewTabs.get(tabId);
+  if (!info) return;
+
+  if (info.mode === 'split') {
+    closeSplitPreview(workerId, tabId);
+  } else {
+    closePreviewTab(tabId);
+  }
+}
+
 function removePreviewTabs(workerId) {
   const toRemove = [];
   for (const [tabId, info] of previewTabs) {

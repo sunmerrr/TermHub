@@ -15,6 +15,11 @@ const DISCORD_ALERT_WEBHOOK = process.env.DISCORD_ALERT_WEBHOOK;
 const ALERT_WEBHOOK = DISCORD_ALERT_WEBHOOK || DISCORD_WEBHOOK;
 const ENABLE_PREVIEW = process.env.ENABLE_PREVIEW === "1";
 const PREVIEW_TUNNEL = process.env.PREVIEW_TUNNEL === "1";
+const PREVIEW_HEALTH_INTERVAL_MS = Math.max(
+  60000,
+  Number(process.env.PREVIEW_HEALTH_INTERVAL_MS || 60 * 60 * 1000)
+);
+const PREVIEW_CLOSE_FAILURES = Math.max(1, Number(process.env.PREVIEW_CLOSE_FAILURES || 1));
 const CLAUDE_MIN_ROWS = Math.max(50, Number(process.env.CLAUDE_MIN_ROWS || 500));
 const STATE_PATH = path.join(__dirname, ".termhub-state.json");
 
@@ -190,6 +195,24 @@ function checkContentType(port) {
 
 // 포트 감지됐지만 아직 리스닝 확인 안 된 포트 (워커별)
 const pendingPorts = new Map(); // id → Set<port>
+const previewHealthFailures = new Map(); // "workerId:port" → consecutive failure count
+
+function isCloudflaredPort(port) {
+  try {
+    const out = execSync(`lsof -nP -iTCP:${port} -sTCP:LISTEN`, { encoding: "utf8", stdio: "pipe" });
+    return /\bcloudflar(?:ed)?\b/i.test(out);
+  } catch (e) {
+    return false;
+  }
+}
+
+function portCameFromIgnoredLine(output, index) {
+  const lineStart = output.lastIndexOf("\n", index) + 1;
+  const nextBreak = output.indexOf("\n", index);
+  const lineEnd = nextBreak === -1 ? output.length : nextBreak;
+  const line = output.slice(lineStart, lineEnd);
+  return /\bcloudflared\b/i.test(line) || /trycloudflare\.com/i.test(line);
+}
 
 function detectPorts(id, output) {
   if (!ENABLE_PREVIEW) return;
@@ -207,6 +230,7 @@ function detectPorts(id, output) {
     if (port < 1024 || port > 65535) continue;
     if (port === Number(PORT)) continue;
     if (EXCLUDED_PORTS.has(port)) continue;
+    if (portCameFromIgnoredLine(output, m.index || 0)) continue;
     if (portSet.has(port)) continue;
     pending.add(port);
   }
@@ -220,7 +244,9 @@ function detectPorts(id, output) {
         return;
       }
       if (portSet.has(port)) return;
+      if (isCloudflaredPort(port)) return;
       portSet.add(port);
+      previewHealthFailures.delete(`${id}:${port}`);
 
       // 다른 워커에서 이미 감지·브로드캐스트된 포트면 중복 전송하지 않음
       for (const [wid, pset] of detectedPorts) {
@@ -237,6 +263,54 @@ function detectPorts(id, output) {
         if (PREVIEW_TUNNEL) startPreviewTunnel(port);
       });
     });
+  }
+}
+
+function stopPreviewTunnelIfUnused(port) {
+  for (const portSet of detectedPorts.values()) {
+    if (portSet.has(port)) return;
+  }
+  const tunnel = previewTunnels.get(port);
+  if (tunnel) {
+    tunnel.process.kill();
+    previewTunnels.delete(port);
+  }
+}
+
+function closeDetectedPreview(workerId, port) {
+  const portSet = detectedPorts.get(workerId);
+  if (portSet) {
+    portSet.delete(port);
+    if (!portSet.size) detectedPorts.delete(workerId);
+  }
+  const pending = pendingPorts.get(workerId);
+  if (pending) {
+    pending.delete(port);
+    if (!pending.size) pendingPorts.delete(workerId);
+  }
+  previewHealthFailures.delete(`${workerId}:${port}`);
+  stopPreviewTunnelIfUnused(port);
+  broadcast({ type: "preview_closed", workerId, port });
+}
+
+function checkPreviewPorts() {
+  if (!ENABLE_PREVIEW) return;
+  for (const [workerId, portSet] of detectedPorts) {
+    for (const port of [...portSet]) {
+      checkPortListening(port).then((listening) => {
+        const key = `${workerId}:${port}`;
+        if (listening) {
+          previewHealthFailures.delete(key);
+          return;
+        }
+        const failures = (previewHealthFailures.get(key) || 0) + 1;
+        if (failures >= PREVIEW_CLOSE_FAILURES) {
+          closeDetectedPreview(workerId, port);
+        } else {
+          previewHealthFailures.set(key, failures);
+        }
+      });
+    }
   }
 }
 
@@ -937,6 +1011,9 @@ function cleanupPreviewPorts(workerId) {
 
   detectedPorts.delete(workerId);
   pendingPorts.delete(workerId);
+  for (const key of [...previewHealthFailures.keys()]) {
+    if (key.startsWith(`${workerId}:`)) previewHealthFailures.delete(key);
+  }
 }
 
 function checkTunnel() {
@@ -982,6 +1059,10 @@ server.listen(PORT, () => {
     setInterval(checkTunnel, 60000);
   } else {
     console.log("☁️  Tunnel health check disabled (set ENABLE_TUNNEL_HEALTHCHECK=1 to enable)");
+  }
+  if (ENABLE_PREVIEW) {
+    setInterval(checkPreviewPorts, PREVIEW_HEALTH_INTERVAL_MS);
+    console.log(`🔎 Preview health check every ${Math.round(PREVIEW_HEALTH_INTERVAL_MS / 60000)}m`);
   }
 });
 
