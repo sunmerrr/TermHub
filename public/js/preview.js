@@ -4,6 +4,8 @@
 // "preview-{workerId}-{port}" → { workerId, port, url, mode }
 // mode: 'tab' (별도 탭) | 'split' (워커 패널 내 좌우 분할)
 const previewTabs = new Map();
+const pendingPreviewRetries = new Map();
+const previewTunnelUrls = new Map();
 
 function isRemoteAccess() {
   return location.hostname !== 'localhost' && location.hostname !== '127.0.0.1';
@@ -13,22 +15,35 @@ function isWideScreen() {
   return window.innerWidth >= 768;
 }
 
+function getPreviewUrls(port) {
+  const localUrl = 'http://localhost:' + port;
+  const tunnelUrl = previewTunnelUrls.get(Number(port)) || null;
+  return {
+    iframeSrc: isRemoteAccess() && tunnelUrl ? tunnelUrl : localUrl,
+    openHref: tunnelUrl || localUrl,
+    label: tunnelUrl
+      ? (isRemoteAccess() ? tunnelUrl : 'localhost:' + port + ' (' + tunnelUrl + ')')
+      : localUrl,
+  };
+}
+
 // ── Split Preview ──
 
 function ensureSplitPreview(workerId, port) {
   const tabId = 'preview-' + workerId + '-' + port;
-  if (previewTabs.has(tabId)) return;
+  if (previewTabs.has(tabId)) return true;
 
   const workerPanel = document.querySelector('.tab-panel[data-id="' + workerId + '"]');
-  if (!workerPanel) return;
+  if (!workerPanel) return false;
 
   // 해당 워커 패널에 이미 split-preview가 있으면 두 번째 포트는 별도 탭으로
   if (workerPanel.querySelector('.split-preview')) {
     ensurePreviewTab(workerId, port);
-    return;
+    return true;
   }
 
-  const iframeSrc = 'http://localhost:' + port;
+  const urls = getPreviewUrls(port);
+  const iframeSrc = urls.iframeSrc;
 
   const container = document.createElement('div');
   container.className = 'split-preview';
@@ -36,9 +51,9 @@ function ensureSplitPreview(workerId, port) {
 
   container.innerHTML =
     '<div class="preview-toolbar">' +
-      '<span class="preview-url" id="preview-url-' + tabId + '">' + iframeSrc + '</span>' +
+      '<span class="preview-url" id="preview-url-' + tabId + '">' + urls.label + '</span>' +
       '<button class="preview-btn" onclick="refreshPreview(\'' + tabId + '\')">↺</button>' +
-      '<a class="preview-btn" id="preview-open-' + tabId + '" href="' + iframeSrc + '" target="_blank">↗</a>' +
+      '<a class="preview-btn" id="preview-open-' + tabId + '" href="' + urls.openHref + '" target="_blank">↗</a>' +
       '<button class="split-preview-close" title="미리보기 닫기">✕</button>' +
     '</div>' +
     '<iframe' +
@@ -72,6 +87,7 @@ function ensureSplitPreview(workerId, port) {
 
   // 터미널 cols/rows 재계산 (레이아웃 변경으로 너비가 절반이 됨)
   setTimeout(sendResize, 100);
+  return true;
 }
 
 function closeSplitPreview(workerId, tabId) {
@@ -109,10 +125,46 @@ function isPortPreviewed(port) {
 function ensurePreview(workerId, port) {
   if (isPortPreviewed(port)) return;
   if (isWideScreen() && typeof layout !== 'undefined' && layout === 'tab') {
-    ensureSplitPreview(workerId, port);
+    if (ensureSplitPreview(workerId, port)) return;
+    schedulePreviewRetry(workerId, port);
   } else {
     ensurePreviewTab(workerId, port);
   }
+}
+
+function schedulePreviewRetry(workerId, port) {
+  var key = String(workerId) + ':' + port;
+  if (pendingPreviewRetries.has(key)) return;
+
+  var attempts = 0;
+  var retry = function() {
+    if (isPortPreviewed(port)) {
+      pendingPreviewRetries.delete(key);
+      return;
+    }
+
+    if (!isWideScreen() || typeof layout === 'undefined' || layout !== 'tab') {
+      pendingPreviewRetries.delete(key);
+      ensurePreviewTab(workerId, port);
+      return;
+    }
+
+    if (ensureSplitPreview(workerId, port)) {
+      pendingPreviewRetries.delete(key);
+      return;
+    }
+
+    attempts += 1;
+    if (attempts >= 20) {
+      pendingPreviewRetries.delete(key);
+      ensurePreviewTab(workerId, port);
+      return;
+    }
+
+    pendingPreviewRetries.set(key, setTimeout(retry, 250));
+  };
+
+  pendingPreviewRetries.set(key, setTimeout(retry, 250));
 }
 
 function ensurePreviewTab(workerId, port) {
@@ -138,13 +190,14 @@ function ensurePreviewTab(workerId, port) {
   panel.className = 'tab-panel preview-panel';
   panel.dataset.id = tabId;
 
-  const iframeSrc = 'http://localhost:' + port;
+  const urls = getPreviewUrls(port);
+  const iframeSrc = urls.iframeSrc;
 
   panel.innerHTML =
     '<div class="preview-toolbar">' +
-      '<span class="preview-url" id="preview-url-' + tabId + '">' + iframeSrc + '</span>' +
+      '<span class="preview-url" id="preview-url-' + tabId + '">' + urls.label + '</span>' +
       '<button class="preview-btn" onclick="refreshPreview(\'' + tabId + '\')">↺ 새로고침</button>' +
-      '<a class="preview-btn" id="preview-open-' + tabId + '" href="' + iframeSrc + '" target="_blank">↗ 새 탭</a>' +
+      '<a class="preview-btn" id="preview-open-' + tabId + '" href="' + urls.openHref + '" target="_blank">↗ 새 탭</a>' +
     '</div>' +
     '<iframe' +
       ' id="preview-iframe-' + tabId + '"' +
@@ -165,9 +218,6 @@ function ensurePreviewTab(workerId, port) {
   document.getElementById('tab-content').appendChild(panel);
 
   previewTabs.set(tabId, { workerId: String(workerId), port, url: null });
-
-  // 자동 활성화
-  selectTab(tabId);
 }
 
 function refreshPreview(tabId) {
@@ -184,8 +234,11 @@ function refreshPreview(tabId) {
 }
 
 function updatePreviewTunnel(port, url) {
+  const numericPort = Number(port);
+  previewTunnelUrls.set(numericPort, url);
+
   for (const [tabId, info] of previewTabs) {
-    if (info.port !== port) continue;
+    if (Number(info.port) !== numericPort) continue;
 
     info.url = url;
 

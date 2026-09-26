@@ -10,7 +10,11 @@ const { WebSocketServer } = require("ws");
 const PORT = process.env.PORT || 8081;
 const PASSWORD = process.env.DASHBOARD_PASSWORD || "changeme";
 const DISCORD_WEBHOOK = process.env.DISCORD_WEBHOOK;
+const DISCORD_USERNAME = "lulu";
+const DISCORD_AVATAR_URL = "https://api.dicebear.com/9.x/bottts/png?seed=lulu";
 const ENABLE_TUNNEL_HEALTHCHECK = process.env.ENABLE_TUNNEL_HEALTHCHECK === "1";
+const TUNNEL_HEALTHCHECK_INTERVAL_MS = Number(process.env.TUNNEL_HEALTHCHECK_INTERVAL_MS || 30000);
+const TUNNEL_HEALTHCHECK_FAILURE_LIMIT = Number(process.env.TUNNEL_HEALTHCHECK_FAILURE_LIMIT || 2);
 const DISCORD_ALERT_WEBHOOK = process.env.DISCORD_ALERT_WEBHOOK;
 const ALERT_WEBHOOK = DISCORD_ALERT_WEBHOOK || DISCORD_WEBHOOK;
 const ENABLE_PREVIEW = process.env.ENABLE_PREVIEW === "1";
@@ -22,13 +26,30 @@ const PREVIEW_HEALTH_INTERVAL_MS = Math.max(
 const PREVIEW_CLOSE_FAILURES = Math.max(1, Number(process.env.PREVIEW_CLOSE_FAILURES || 1));
 const CLAUDE_MIN_ROWS = Math.max(50, Number(process.env.CLAUDE_MIN_ROWS || 500));
 const STATE_PATH = path.join(__dirname, ".termhub-state.json");
+const ENABLE_PREVIEW_PORT_SCAN = process.env.ENABLE_PREVIEW_PORT_SCAN === "1";
 
 // workerId(문자열) → Set<number> : 워커별 감지된 포트 목록
 const detectedPorts = new Map();
 // port(number) → { process, url } : 포트별 cloudflared 터널 상태
 const previewTunnels = new Map();
-// localhost 포트 감지 정규식
-const PORT_PATTERN = /(?:https?:\/\/)?(?:localhost|127\.0\.0\.1):(\d{2,5})/g;
+// localhost 포트 감지 정규식: common dev-server output formats.
+const PORT_PATTERNS = [
+  /(?:https?:\/\/)?(?:localhost|127\.0\.0\.1|0\.0\.0\.0|\d{1,3}(?:\.\d{1,3}){3}|\[?::1\]?|\[?::\]?|host\.docker\.internal|\S+\.local):(\d{2,5})(?=\b|[/?#])/gim,
+  /\b(?:port|listening|server)\b[^\n\d]{0,40}(\d{2,5})(?=\b|[/?#])/gim,
+];
+const PREVIEW_IGNORE_OUTPUT_PATTERN = /\b(mcp|model context protocol|cloudflared|trycloudflare\.com|debugger|inspector|devtools)\b/i;
+const PREVIEW_IGNORE_PROCESS_PATTERN = /\b(mcp|mcp-server|cloudflared|rapportd|discord|figma|code helper|limactl|ssh)\b/i;
+const PREVIEW_ALLOWED_PORTS = new Set(
+  (process.env.PREVIEW_ALLOWED_PORTS || "")
+    .split(",")
+    .map((value) => Number(value.trim()))
+    .filter((port) => Number.isInteger(port) && port >= 1 && port <= 65535)
+);
+const PORT_SCAN_INTERVAL_MS = Number(process.env.PORT_SCAN_INTERVAL_MS || 3000);
+const IGNORED_PREVIEW_PORT_TTL_MS = Number(process.env.IGNORED_PREVIEW_PORT_TTL_MS || 60000);
+let lastPortScanAt = 0;
+let cachedListeningPortsByPid = new Map();
+const ignoredPreviewPorts = new Map();
 
 if (PASSWORD === "changeme") {
   console.warn("⚠️  Using default password. Please set DASHBOARD_PASSWORD environment variable.");
@@ -65,6 +86,14 @@ function isAlive(sessionName) {
 function tmux(cmd) {
   try { return execSync("tmux " + cmd, { encoding: "utf8", stdio: "pipe" }); }
   catch (e) { return ""; }
+}
+
+function tmuxExec(args) {
+  try {
+    return execFileSync("tmux", args.map(String), { encoding: "utf8", stdio: "pipe" });
+  } catch (e) {
+    return "";
+  }
 }
 
 function loadConfig() {
@@ -180,10 +209,9 @@ function checkPortListening(port) {
   return tryConnect("127.0.0.1").then((ok) => ok ? true : tryConnect("::1"));
 }
 
-// Content-Type 체크: HTML이면 프론트엔드로 판단
-function checkContentType(port) {
+function requestContentType(port, hostname) {
   return new Promise((resolve) => {
-    const req = http.get({ hostname: "127.0.0.1", port, path: "/", timeout: 2000 }, (res) => {
+    const req = http.get({ hostname, port, path: "/", timeout: 2000 }, (res) => {
       const ct = (res.headers["content-type"] || "").toLowerCase();
       res.resume(); // 응답 body 소비 (메모리 누수 방지)
       resolve(ct.includes("text/html") ? "html" : ct || "unknown");
@@ -191,6 +219,197 @@ function checkContentType(port) {
     req.on("error", () => resolve("error"));
     req.on("timeout", () => { req.destroy(); resolve("timeout"); });
   });
+}
+
+// Content-Type 체크: HTML이면 프론트엔드로 판단
+async function checkContentType(port) {
+  const ipv4 = await requestContentType(port, "127.0.0.1");
+  if (ipv4 !== "error" && ipv4 !== "timeout") return ipv4;
+  return requestContentType(port, "::1");
+}
+
+function isPreviewPort(port) {
+  return Number.isInteger(port) &&
+    port >= 1024 &&
+    port <= 65535 &&
+    port !== Number(PORT) &&
+    (PREVIEW_ALLOWED_PORTS.has(port) || !EXCLUDED_PORTS.has(port));
+}
+
+function isExplicitlyAllowedPreviewPort(port) {
+  return PREVIEW_ALLOWED_PORTS.has(port);
+}
+
+function isRecentlyIgnoredPreviewPort(port) {
+  const ignoredAt = ignoredPreviewPorts.get(port);
+  if (!ignoredAt) return false;
+  if (Date.now() - ignoredAt <= IGNORED_PREVIEW_PORT_TTL_MS) return true;
+  ignoredPreviewPorts.delete(port);
+  return false;
+}
+
+function rememberIgnoredPreviewPort(port) {
+  ignoredPreviewPorts.set(port, Date.now());
+}
+
+function getCommandLine(pid) {
+  try {
+    return execFileSync("ps", ["-p", String(pid), "-o", "command="], {
+      encoding: "utf8",
+      stdio: "pipe",
+    }).trim();
+  } catch (e) {
+    return "";
+  }
+}
+
+function isIgnoredPreviewPortOwner(port) {
+  let raw = "";
+  try {
+    raw = execFileSync("lsof", ["-nP", `-iTCP:${port}`, "-sTCP:LISTEN", "-Fpc"], {
+      encoding: "utf8",
+      maxBuffer: 256 * 1024,
+      stdio: "pipe",
+    });
+  } catch (e) {
+    return false;
+  }
+
+  let current = { pid: null, command: "" };
+  for (const line of raw.split("\n")) {
+    if (!line) continue;
+    if (line[0] === "p") {
+      current = { pid: line.slice(1), command: "" };
+      if (PREVIEW_IGNORE_PROCESS_PATTERN.test(getCommandLine(current.pid))) {
+        return true;
+      }
+      continue;
+    }
+    if (line[0] !== "c") continue;
+    current.command = line.slice(1);
+    if (PREVIEW_IGNORE_PROCESS_PATTERN.test(current.command)) {
+      return true;
+    }
+  }
+  return false;
+}
+
+function getProcessChildrenByPpid() {
+  const children = new Map();
+  let raw = "";
+  try {
+    raw = execFileSync("ps", ["-axo", "pid=,ppid="], { encoding: "utf8", stdio: "pipe" });
+  } catch (e) {
+    return children;
+  }
+
+  for (const line of raw.trim().split("\n")) {
+    const parts = line.trim().split(/\s+/);
+    if (parts.length < 2) continue;
+    const pid = Number(parts[0]);
+    const ppid = Number(parts[1]);
+    if (!Number.isInteger(pid) || !Number.isInteger(ppid)) continue;
+    if (!children.has(ppid)) children.set(ppid, []);
+    children.get(ppid).push(pid);
+  }
+  return children;
+}
+
+function collectDescendantPids(rootPid) {
+  const root = Number(rootPid);
+  if (!Number.isInteger(root) || root <= 0) return new Set();
+
+  const children = getProcessChildrenByPpid();
+  const pids = new Set([root]);
+  const stack = [root];
+  while (stack.length) {
+    const pid = stack.pop();
+    for (const child of children.get(pid) || []) {
+      if (pids.has(child)) continue;
+      pids.add(child);
+      stack.push(child);
+    }
+  }
+  return pids;
+}
+
+function getListeningPortsByPid() {
+  const now = Date.now();
+  if (now - lastPortScanAt < PORT_SCAN_INTERVAL_MS) return cachedListeningPortsByPid;
+  lastPortScanAt = now;
+  const byPid = new Map();
+
+  let raw = "";
+  try {
+    raw = execFileSync("lsof", ["-nP", "-iTCP", "-sTCP:LISTEN", "-FnP"], {
+      encoding: "utf8",
+      maxBuffer: 1024 * 1024,
+      stdio: "pipe",
+    });
+  } catch (e) {
+    cachedListeningPortsByPid = byPid;
+    return byPid;
+  }
+
+  let currentPid = null;
+  for (const line of raw.split("\n")) {
+    if (!line) continue;
+    if (line[0] === "p") {
+      currentPid = Number(line.slice(1));
+      continue;
+    }
+    if (line[0] !== "n" || !currentPid) continue;
+    const match = line.match(/:(\d+)(?:\s|\(|$)/);
+    if (!match) continue;
+    const port = Number(match[1]);
+    if (!isPreviewPort(port)) continue;
+    if (!byPid.has(currentPid)) byPid.set(currentPid, new Set());
+    byPid.get(currentPid).add(port);
+  }
+
+  cachedListeningPortsByPid = byPid;
+  return byPid;
+}
+
+function addPendingPort(id, port) {
+  if (!isPreviewPort(port)) return;
+  if (!isExplicitlyAllowedPreviewPort(port) && isRecentlyIgnoredPreviewPort(port)) return;
+  if (!detectedPorts.has(id)) detectedPorts.set(id, new Set());
+  if (!pendingPorts.has(id)) pendingPorts.set(id, new Set());
+  const portSet = detectedPorts.get(id);
+  if (portSet.has(port)) return;
+  pendingPorts.get(id).add(port);
+}
+
+function scanWorkerListeningPorts(id) {
+  const w = workers.get(id);
+  if (!ENABLE_PREVIEW || !ENABLE_PREVIEW_PORT_SCAN || !w) return;
+
+  const panePid = Number(tmux(`display-message -t ${w.sessionName} -p "#{pane_pid}"`).trim());
+  const workerPids = collectDescendantPids(panePid);
+  if (!workerPids.size) return;
+
+  const listeningPorts = getListeningPortsByPid();
+  for (const pid of workerPids) {
+    for (const port of listeningPorts.get(pid) || []) {
+      addPendingPort(id, port);
+    }
+  }
+}
+
+function extractPortsFromOutput(output) {
+  const ports = new Set();
+  for (const line of output.split("\n")) {
+    if (PREVIEW_IGNORE_OUTPUT_PATTERN.test(line)) continue;
+    for (const pattern of PORT_PATTERNS) {
+      pattern.lastIndex = 0;
+      for (const match of line.matchAll(pattern)) {
+        const port = Number(match[1]);
+        if (isPreviewPort(port)) ports.add(port);
+      }
+    }
+  }
+  return ports;
 }
 
 // 포트 감지됐지만 아직 리스닝 확인 안 된 포트 (워커별)
@@ -216,8 +435,9 @@ function portCameFromIgnoredLine(output, index) {
 
 function detectPorts(id, output) {
   if (!ENABLE_PREVIEW) return;
-  const matches = [...output.matchAll(PORT_PATTERN)];
-  if (!matches.length && (!pendingPorts.has(id) || !pendingPorts.get(id).size)) return;
+  const outputPorts = extractPortsFromOutput(output);
+  scanWorkerListeningPorts(id);
+  if (!outputPorts.size && (!pendingPorts.has(id) || !pendingPorts.get(id).size)) return;
 
   if (!detectedPorts.has(id)) detectedPorts.set(id, new Set());
   if (!pendingPorts.has(id)) pendingPorts.set(id, new Set());
@@ -225,14 +445,8 @@ function detectPorts(id, output) {
   const pending = pendingPorts.get(id);
 
   // 새로 감지된 포트를 pending에 추가
-  for (const m of matches) {
-    const port = parseInt(m[1], 10);
-    if (port < 1024 || port > 65535) continue;
-    if (port === Number(PORT)) continue;
-    if (EXCLUDED_PORTS.has(port)) continue;
-    if (portCameFromIgnoredLine(output, m.index || 0)) continue;
-    if (portSet.has(port)) continue;
-    pending.add(port);
+  for (const port of outputPorts) {
+    addPendingPort(id, port);
   }
 
   // pending 포트들의 리스닝 여부 확인
@@ -245,6 +459,10 @@ function detectPorts(id, output) {
       }
       if (portSet.has(port)) return;
       if (isCloudflaredPort(port)) return;
+      if (!isExplicitlyAllowedPreviewPort(port) && isIgnoredPreviewPortOwner(port)) {
+        rememberIgnoredPreviewPort(port);
+        return;
+      }
       portSet.add(port);
       previewHealthFailures.delete(`${id}:${port}`);
 
@@ -498,8 +716,8 @@ function sendInput(id, text) {
   }
   const lines = text.split("\n");
   for (const line of lines) {
-    tmux(`send-keys -t ${w.sessionName} "${line.replace(/"/g, '\\"')}" ""`);
-    tmux(`send-keys -t ${w.sessionName} "" Enter`);
+    if (line) tmuxExec(["send-keys", "-t", w.sessionName, "-l", "--", line]);
+    tmuxExec(["send-keys", "-t", w.sessionName, "Enter"]);
   }
   rememberAction(w, "input", "text");
   broadcast({ type: "log", id, src: "stdin", text, ts: Date.now() });
@@ -554,6 +772,18 @@ function auth(req) {
   }
 }
 
+function withPathname(rawUrl, pathname) {
+  try {
+    const url = new URL(rawUrl);
+    url.pathname = pathname;
+    url.search = "";
+    url.hash = "";
+    return url.toString();
+  } catch {
+    return rawUrl;
+  }
+}
+
 const server = http.createServer(async (req, res) => {
   const { method } = req;
   const url = req.url.split("?")[0];
@@ -561,6 +791,10 @@ const server = http.createServer(async (req, res) => {
   if (method === "OPTIONS") {
     res.writeHead(204, { "Access-Control-Allow-Origin": "*", "Access-Control-Allow-Headers": "Content-Type" });
     return res.end();
+  }
+
+  if (method === "GET" && url === "/healthz") {
+    return json(res, 200, { ok: true });
   }
 
   if (method === "POST" && url === "/api/login") {
@@ -894,7 +1128,7 @@ function startTunnel() {
     });
     return;
   }
-  tunnelProcess = spawn("cloudflared", ["tunnel", "--url", `http://localhost:${PORT}`], {
+  tunnelProcess = spawn("cloudflared", ["tunnel", "--url", `http://127.0.0.1:${PORT}`], {
     stdio: ["ignore", "pipe", "pipe"],
   });
   const handleData = (data) => {
@@ -918,7 +1152,11 @@ function startTunnel() {
         fetch(DISCORD_WEBHOOK, {
           method: "POST",
           headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ content: `☁️ TermHub → ${tunnelUrl}` }),
+          body: JSON.stringify({
+            username: DISCORD_USERNAME,
+            avatar_url: DISCORD_AVATAR_URL,
+            content: `☁️ TermHub → ${tunnelUrl}`,
+          }),
         }).catch(() => {});
       }
     }
@@ -958,7 +1196,7 @@ function startPreviewTunnel(port) {
   }
 
   console.log(`☁️  Starting preview tunnel for port ${port}...`);
-  const proc = spawn("cloudflared", ["tunnel", "--url", `http://localhost:${port}`], {
+  const proc = spawn("cloudflared", ["tunnel", "--url", `http://127.0.0.1:${port}`], {
     stdio: ["ignore", "pipe", "pipe"],
   });
 
@@ -1018,7 +1256,8 @@ function cleanupPreviewPorts(workerId) {
 
 function checkTunnel() {
   if (!cachedTunnelUrl || !tunnelProcess) return;
-  fetch(cachedTunnelUrl, { signal: AbortSignal.timeout(10000), cache: "no-store" })
+  const healthUrl = withPathname(cachedTunnelUrl, "/healthz");
+  fetch(healthUrl, { signal: AbortSignal.timeout(10000), cache: "no-store" })
     .then(r => {
       if (!r.ok) throw new Error(r.status);
       tunnelHealthFailures = 0;
@@ -1026,19 +1265,19 @@ function checkTunnel() {
     .catch((err) => {
       tunnelHealthFailures += 1;
       const reason = err?.cause?.code || err?.code || err?.message || String(err);
-      console.log(`☁️  Tunnel health check failed (${tunnelHealthFailures}/5): ${reason}`);
-      if (tunnelHealthFailures >= 5) {
-        console.log("☁️  Tunnel health check threshold reached, restarting...");
+      console.log(`☁️  Tunnel health check failed (${tunnelHealthFailures}/${TUNNEL_HEALTHCHECK_FAILURE_LIMIT}): ${reason}`);
+      if (tunnelHealthFailures >= TUNNEL_HEALTHCHECK_FAILURE_LIMIT) {
+        console.log("☁️  Dashboard tunnel health check threshold reached, restarting cloudflared...");
         const processAlive = tunnelProcess && !tunnelProcess.killed && tunnelProcess.exitCode === null;
         const uptimeMin = Math.floor(process.uptime() / 60);
         sendIssueAlert({
           key: "tunnel-healthcheck-threshold",
           title: "🚨 Tunnel Healthcheck Failure",
-          description: "5 consecutive tunnel health checks failed. Restarting cloudflared.",
+          description: `${TUNNEL_HEALTHCHECK_FAILURE_LIMIT} consecutive tunnel health checks failed. Restarting cloudflared.`,
           color: 0xe74c3c,
           fields: [
             { name: "Error", value: reason, inline: false },
-            { name: "Tunnel URL", value: cachedTunnelUrl || "unknown", inline: false },
+            { name: "Health URL", value: healthUrl || "unknown", inline: false },
             { name: "cloudflared alive", value: processAlive ? "Yes" : "No", inline: true },
             { name: "Server uptime", value: `${uptimeMin}m`, inline: true },
           ],
@@ -1056,7 +1295,7 @@ server.listen(PORT, () => {
   console.log(`📺 View tmux session: tmux attach -t term-1`);
   startTunnel();
   if (ENABLE_TUNNEL_HEALTHCHECK) {
-    setInterval(checkTunnel, 60000);
+    setInterval(checkTunnel, TUNNEL_HEALTHCHECK_INTERVAL_MS);
   } else {
     console.log("☁️  Tunnel health check disabled (set ENABLE_TUNNEL_HEALTHCHECK=1 to enable)");
   }
