@@ -47,6 +47,17 @@ function killBtnHtml(id, status) {
   return '<button class="kill-btn" id="kill-' + id + '">Stop</button>';
 }
 
+function isScopedMode() {
+  return typeof scopedWorkerId === 'function' && !!scopedWorkerId();
+}
+
+function cardActionButtonsHtml(id, status) {
+  if (isScopedMode()) return '';
+  return '<button class="share-btn" id="share-' + id + '" title="Scoped URL">Share</button>' +
+    '<button class="diff-btn" id="diff-' + id + '" title="Git Diff">Diff</button>' +
+    killBtnHtml(id, status);
+}
+
 function ensureCard(id, cwd, status, logs, cmd, reason, title, sessionName) {
   if (document.getElementById('card-' + id)) return;
 
@@ -59,8 +70,7 @@ function ensureCard(id, cwd, status, logs, cmd, reason, title, sessionName) {
     '<div class="card-header">' +
       '<span class="card-title" id="card-title-' + id + '">#' + id + ' ' + cmdLabel + ' · ' + (cwd.replace(/\/$/, '').split('/').pop() || cwd) + '</span>' +
       '<span class="badge' + (status === 'stopped' ? ' stopped' : '') + (status === 'completed' ? ' completed' : '') + '" id="badge-' + id + '">' + status + '</span>' +
-      '<button class="diff-btn" id="diff-' + id + '" title="Git Diff">Diff</button>' +
-      killBtnHtml(id, status) +
+      cardActionButtonsHtml(id, status) +
     '</div>' +
     '<div class="card-cwd">' + displayPath(cwd) + '</div>' +
     '<div class="exit-reason" id="exit-reason-' + id + '"></div>' +
@@ -153,6 +163,9 @@ function bindCard(id, root) {
 
   const diffBtn = q('#diff-' + id);
   if (diffBtn) diffBtn.addEventListener('click', () => openGitDiff(id));
+
+  const shareBtn = q('#share-' + id);
+  if (shareBtn) shareBtn.addEventListener('click', () => shareWorkerUrl(id, shareBtn));
 
   if (killBtn) killBtn.addEventListener('click', () => killWorker(id));
   if (sendBtn) sendBtn.addEventListener('click', () => sendInput(id));
@@ -375,6 +388,34 @@ function reconnectWorker(id) {
     .then(d => {
       if (!d.ok) alert('Session is no longer alive.');
     });
+}
+
+function shareWorkerUrl(id, btn) {
+  apiPost('/api/share-url', { id })
+    .then(r => r.json().catch(() => ({})).then(d => ({ ok: r.ok, d })))
+    .then(({ ok, d }) => {
+      if (!ok || !d.url) {
+        alert(d.error || 'Failed to create scoped URL.');
+        return;
+      }
+
+      const done = () => {
+        if (!btn) return;
+        const prev = btn.textContent;
+        btn.textContent = 'Copied';
+        setTimeout(() => { btn.textContent = prev; }, 1200);
+      };
+
+      if (navigator.clipboard && window.isSecureContext) {
+        navigator.clipboard.writeText(d.url).then(done).catch(() => {
+          prompt('Scoped URL', d.url);
+        });
+      } else {
+        prompt('Scoped URL', d.url);
+        done();
+      }
+    })
+    .catch(() => alert('Failed to create scoped URL.'));
 }
 
 // ── Worker Actions ──

@@ -2,9 +2,22 @@
 
 let ws;
 
+function scopedWorkerId() {
+  return new URLSearchParams(location.search).get('worker');
+}
+
+function scopedApiUrl(url) {
+  const workerId = scopedWorkerId();
+  if (!workerId) return url;
+  const sep = url.includes('?') ? '&' : '?';
+  return url + sep + 'worker=' + encodeURIComponent(workerId);
+}
+
 function initWS() {
   const proto = location.protocol === 'https:' ? 'wss' : 'ws';
-  ws = new WebSocket(proto + '://' + location.host);
+  const workerId = scopedWorkerId();
+  const scopedQuery = workerId ? '?worker=' + encodeURIComponent(workerId) : '';
+  ws = new WebSocket(proto + '://' + location.host + scopedQuery);
   ws.onopen = () => {
     document.getElementById('status-dot').classList.remove('off');
     sendResize();
@@ -92,7 +105,7 @@ function showLogin() {
 }
 
 function apiPost(url, body) {
-  return fetch(url, {
+  return fetch(scopedApiUrl(url), {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify(body),
@@ -105,7 +118,7 @@ function apiPost(url, body) {
 }
 
 function apiGet(url) {
-  return fetch(url, { credentials: 'include' }).then(r => {
+  return fetch(scopedApiUrl(url), { credentials: 'include' }).then(r => {
     if (r.status === 401) {
       showLogin();
       return null;
@@ -133,6 +146,7 @@ function loadConfig() {
   apiGet('/api/config')
     .then(cfg => {
       if (!cfg) return;
+      if (cfg.scopedWorkerId && typeof applyScopedMode === 'function') applyScopedMode(cfg.scopedWorkerId);
       if (cfg.basePath) window._basePath = cfg.basePath;
       if (cfg.favorites && !localStorage.getItem('fav')) {
         favorites = cfg.favorites;

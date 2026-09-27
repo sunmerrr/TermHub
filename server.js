@@ -56,6 +56,7 @@ if (PASSWORD === "changeme") {
 }
 
 const workers = new Map();
+const workerResizeOwners = new Map();
 let nextId = 1;
 let tunnelUrl = null;
 let tunnelProcess = null;
@@ -70,6 +71,10 @@ const ISSUE_ALERT_COOLDOWN_MS = 120000; // 120s cooldown per issue key
 // Rotating PASSWORD invalidates all existing cookies.
 function expectedToken() {
   return crypto.createHmac("sha256", PASSWORD).update("termhub-session-v1").digest("hex");
+}
+
+function workerScopeToken(workerId) {
+  return crypto.createHmac("sha256", PASSWORD).update(`termhub-worker-scope-v1:${workerId}`).digest("hex");
 }
 
 const SESSION_MAX_AGE = 60 * 60 * 24; // 1 day
@@ -742,7 +747,9 @@ let wss;
 function broadcast(obj) {
   if (!wss) return;
   const msg = JSON.stringify(obj);
-  wss.clients.forEach(c => { if (c.readyState === 1) c.send(msg); });
+  wss.clients.forEach(c => {
+    if (c.readyState === 1 && canReceiveMessage(c.authContext, obj)) c.send(msg);
+  });
 }
 
 function readBody(req) {
@@ -758,18 +765,97 @@ function json(res, code, obj) {
   res.end(JSON.stringify(obj));
 }
 
-function auth(req) {
-  const cookie = req.headers.cookie || "";
-  const token = cookie.split(";").map(s => s.trim()).find(s => s.startsWith("token="))?.slice(6);
-  if (!token) return false;
-  const expected = expectedToken();
-  // timingSafeEqual은 길이가 같아야 함 — 다르면 즉시 false
-  if (token.length !== expected.length) return false;
+function safeEqual(a, b) {
+  if (!a || !b || a.length !== b.length) return false;
   try {
-    return crypto.timingSafeEqual(Buffer.from(token), Buffer.from(expected));
+    return crypto.timingSafeEqual(Buffer.from(a), Buffer.from(b));
   } catch {
     return false;
   }
+}
+
+function parseCookies(req) {
+  const cookie = req.headers.cookie || "";
+  const out = {};
+  for (const part of cookie.split(";")) {
+    const idx = part.indexOf("=");
+    if (idx === -1) continue;
+    const key = part.slice(0, idx).trim();
+    const value = part.slice(idx + 1).trim();
+    if (!key) continue;
+    try {
+      out[key] = decodeURIComponent(value);
+    } catch {
+      out[key] = value;
+    }
+  }
+  return out;
+}
+
+function parseWorkerScopeCookie(req) {
+  const raw = parseCookies(req).worker_scope;
+  if (!raw) return null;
+  const [workerId, token] = raw.split(".");
+  if (!workerId || !token || !workers.has(workerId)) return null;
+  if (!safeEqual(token, workerScopeToken(workerId))) return null;
+  return workerId;
+}
+
+function requestedWorkerScope(req) {
+  try {
+    const params = new URL(req.url, "http://localhost").searchParams;
+    return params.get("worker") || params.get("scope") || params.get("worker_scope");
+  } catch {
+    return null;
+  }
+}
+
+function authContext(req) {
+  const cookies = parseCookies(req);
+  const scopedWorkerId = parseWorkerScopeCookie(req);
+  const requestedScope = requestedWorkerScope(req);
+  if (requestedScope && scopedWorkerId && requestedScope === scopedWorkerId) {
+    return { kind: "worker", workerId: scopedWorkerId };
+  }
+
+  if (safeEqual(cookies.token || "", expectedToken())) {
+    return { kind: "full" };
+  }
+
+  if (scopedWorkerId) {
+    return { kind: "worker", workerId: scopedWorkerId };
+  }
+
+  return null;
+}
+
+function auth(req) {
+  return !!authContext(req);
+}
+
+function isFullAuth(req) {
+  return authContext(req)?.kind === "full";
+}
+
+function workerSummary(id, w) {
+  return {
+    id,
+    cwd: w.cwd,
+    cmd: w.cmd || "claude",
+    status: (w.status === "completed" || w.status === "stopped") ? w.status : (isAlive(w.sessionName) ? "running" : (w.status || "stopped")),
+    sessionName: w.sessionName,
+    title: w.title || getSessionTitle(w.sessionName),
+    logs: w.logs,
+    aiState: w.aiState || null,
+    exitReason: w.exitReason || null
+  };
+}
+
+function scopedUrlFor(req, workerId) {
+  const proto = req.headers["x-forwarded-proto"] || (req.socket.encrypted ? "https" : "http");
+  const host = req.headers["x-forwarded-host"] || req.headers.host || `localhost:${PORT}`;
+  const token = workerScopeToken(workerId);
+  return `${proto}://${host}/?worker=${encodeURIComponent(workerId)}&token=${encodeURIComponent(token)}`;
 }
 
 function withPathname(rawUrl, pathname) {
@@ -784,9 +870,51 @@ function withPathname(rawUrl, pathname) {
   }
 }
 
+function canReceiveMessage(ctx, obj) {
+  if (!ctx) return false;
+  if (ctx.kind === "full") return true;
+
+  const workerId = String(ctx.workerId);
+  if (obj.id && String(obj.id) !== workerId) return false;
+  if (obj.workerId && String(obj.workerId) !== workerId) return false;
+  if (obj.type === "preview_tunnel") {
+    return detectedPorts.get(workerId)?.has(Number(obj.port)) || false;
+  }
+  return ["spawned", "log", "status", "cwd", "aiState", "snapshot", "title", "preview_detected", "preview_prompt", "preview_closed"].includes(obj.type);
+}
+
+function canAccessWorker(ctx, workerId) {
+  if (!ctx) return false;
+  if (ctx.kind === "full") return true;
+  return String(ctx.workerId) === String(workerId);
+}
+
+function setWorkerSize(workerId, size, owner) {
+  const w = workers.get(String(workerId));
+  if (!w) return;
+  const currentOwner = workerResizeOwners.get(String(workerId));
+  if (currentOwner && currentOwner !== owner) return;
+  w.cols = size.cols;
+  w.rows = size.rows;
+}
+
+function setAllUnownedWorkerSizes(size, owner) {
+  workers.forEach((_, workerId) => {
+    if (workerResizeOwners.has(workerId)) return;
+    setWorkerSize(workerId, size, owner);
+  });
+}
+
+function releaseResizeOwnership(owner) {
+  for (const [workerId, currentOwner] of workerResizeOwners) {
+    if (currentOwner === owner) workerResizeOwners.delete(workerId);
+  }
+}
+
 const server = http.createServer(async (req, res) => {
   const { method } = req;
-  const url = req.url.split("?")[0];
+  const parsedUrl = new URL(req.url, "http://localhost");
+  const url = parsedUrl.pathname;
 
   if (method === "OPTIONS") {
     res.writeHead(204, { "Access-Control-Allow-Origin": "*", "Access-Control-Allow-Headers": "Content-Type" });
@@ -809,6 +937,18 @@ const server = http.createServer(async (req, res) => {
   }
 
   if (method === "GET" && url === "/") {
+    const scopedWorkerId = parsedUrl.searchParams.get("worker");
+    const scopedToken = parsedUrl.searchParams.get("token") || parsedUrl.searchParams.get("access");
+    if (scopedWorkerId && scopedToken) {
+      if (!workers.has(scopedWorkerId) || !safeEqual(scopedToken, workerScopeToken(scopedWorkerId))) {
+        return json(res, 401, { error: "unauthorized" });
+      }
+      const cookieValue = encodeURIComponent(`${scopedWorkerId}.${scopedToken}`);
+      const cookie = `worker_scope=${cookieValue}; Path=/; HttpOnly; SameSite=Lax; Max-Age=${SESSION_MAX_AGE}`;
+      res.writeHead(302, { "Set-Cookie": cookie, "Location": `/?worker=${encodeURIComponent(scopedWorkerId)}` });
+      return res.end();
+    }
+
     const html = fs.readFileSync(path.join(__dirname, "index.html"));
     res.writeHead(200, { "Content-Type": "text/html; charset=utf-8" });
     return res.end(html);
@@ -826,30 +966,26 @@ const server = http.createServer(async (req, res) => {
   }
 
   if (method === "GET" && url === "/api/config") {
-    if (!auth(req)) return json(res, 401, { error: "unauthorized" });
+    const ctx = authContext(req);
+    if (!ctx) return json(res, 401, { error: "unauthorized" });
+    if (ctx.kind === "worker") return json(res, 200, { scopedWorkerId: ctx.workerId });
     const configPath = path.join(__dirname, "config.json");
     const config = fs.existsSync(configPath) ? JSON.parse(fs.readFileSync(configPath, "utf8")) : {};
     return json(res, 200, config);
   }
 
-  if (!auth(req)) return json(res, 401, { error: "unauthorized" });
+  const ctx = authContext(req);
+  if (!ctx) return json(res, 401, { error: "unauthorized" });
 
   if (method === "GET" && url === "/api/workers") {
-    const list = [...workers.entries()].map(([id, w]) => ({
-      id,
-      cwd: w.cwd,
-      cmd: w.cmd || "claude",
-      status: (w.status === "completed" || w.status === "stopped") ? w.status : (isAlive(w.sessionName) ? "running" : (w.status || "stopped")),
-      sessionName: w.sessionName,
-      title: w.title || getSessionTitle(w.sessionName),
-      logs: w.logs,
-      aiState: w.aiState || null,
-      exitReason: w.exitReason || null
-    }));
+    const list = ctx.kind === "worker"
+      ? (workers.has(ctx.workerId) ? [workerSummary(ctx.workerId, workers.get(ctx.workerId))] : [])
+      : [...workers.entries()].map(([id, w]) => workerSummary(id, w));
     return json(res, 200, list);
   }
 
   if (method === "GET" && url === "/api/scan") {
+    if (ctx.kind !== "full") return json(res, 403, { error: "forbidden" });
     const raw = tmux("ls -F '#{session_name}|#{pane_current_path}'");
     const existingNames = new Set([...workers.values()].map(w => w.sessionName));
     const found = [];
@@ -863,6 +999,7 @@ const server = http.createServer(async (req, res) => {
   }
 
   if (method === "POST" && url === "/api/attach") {
+    if (ctx.kind !== "full") return json(res, 403, { error: "forbidden" });
     const { sessionName, cwd } = JSON.parse(await readBody(req));
     const id = String(nextId++);
     workers.set(id, {
@@ -883,6 +1020,7 @@ const server = http.createServer(async (req, res) => {
   }
 
   if (method === "POST" && url === "/api/spawn") {
+    if (ctx.kind !== "full") return json(res, 403, { error: "forbidden" });
     const body = JSON.parse(await readBody(req));
     const rawCwd = body.cwd || process.cwd();
     const resolvedCwd = path.resolve(rawCwd);
@@ -900,6 +1038,7 @@ const server = http.createServer(async (req, res) => {
 
   if (method === "POST" && url === "/api/title") {
     const { id, title } = JSON.parse(await readBody(req));
+    if (!canAccessWorker(ctx, id)) return json(res, 403, { ok: false, error: "forbidden" });
     const w = workers.get(String(id));
     if (!w) return json(res, 404, { ok: false });
     w.title = setSessionTitle(w.sessionName, title);
@@ -909,17 +1048,20 @@ const server = http.createServer(async (req, res) => {
 
   if (method === "POST" && url === "/api/input") {
     const { id, text } = JSON.parse(await readBody(req));
+    if (!canAccessWorker(ctx, id)) return json(res, 403, { ok: false, error: "forbidden" });
     const ok = sendInput(id, text);
     return json(res, 200, { ok });
   }
 
   if (method === "POST" && url === "/api/remove") {
+    if (ctx.kind !== "full") return json(res, 403, { error: "forbidden" });
     const { id } = JSON.parse(await readBody(req));
     const w = workers.get(id);
     if (w) {
       if (w.pollTimer) clearInterval(w.pollTimer);
       cleanupPreviewPorts(id);
       if (!isAlive(w.sessionName)) setSessionTitle(w.sessionName, "");
+      workerResizeOwners.delete(String(id));
       // 워커 관련 alert 쿨다운 키 정리 (issueAlertTime 무한 누적 방지)
       issueAlertTime.delete(`worker-waiting-${id}`);
       workers.delete(id);
@@ -929,6 +1071,7 @@ const server = http.createServer(async (req, res) => {
 
   if (method === "POST" && url === "/api/key") {
     const { id, key } = JSON.parse(await readBody(req));
+    if (!canAccessWorker(ctx, id)) return json(res, 403, { ok: false, error: "forbidden" });
     const w = workers.get(id);
     if (w) {
       if (w.status === "completed") {
@@ -945,6 +1088,7 @@ const server = http.createServer(async (req, res) => {
   }
 
   if (method === "POST" && url === "/api/reconnect") {
+    if (ctx.kind !== "full") return json(res, 403, { error: "forbidden" });
     const { id } = JSON.parse(await readBody(req));
     const w = workers.get(id);
     if (!w) return json(res, 404, { ok: false });
@@ -962,6 +1106,7 @@ const server = http.createServer(async (req, res) => {
   }
 
   if (method === "GET" && url === "/api/git-diff") {
+    if (ctx.kind !== "full") return json(res, 403, { error: "forbidden" });
     const params = new URL(req.url, 'http://localhost').searchParams;
     const workerId = params.get('id');
     const file = params.get('file');
@@ -1016,13 +1161,22 @@ const server = http.createServer(async (req, res) => {
   }
 
   if (method === "GET" && url === "/api/tunnel") {
+    if (ctx.kind !== "full") return json(res, 403, { error: "forbidden" });
     return json(res, 200, { url: tunnelUrl });
   }
 
   if (method === "POST" && url === "/api/kill") {
+    if (ctx.kind !== "full") return json(res, 403, { error: "forbidden" });
     const { id } = JSON.parse(await readBody(req));
     killWorker(id, "Stopped from dashboard (Stop button).");
     return json(res, 200, { ok: true });
+  }
+
+  if (method === "POST" && url === "/api/share-url") {
+    if (ctx.kind !== "full") return json(res, 403, { error: "forbidden" });
+    const { id } = JSON.parse(await readBody(req));
+    if (!workers.has(String(id))) return json(res, 404, { error: "worker not found" });
+    return json(res, 200, { url: scopedUrlFor(req, String(id)) });
   }
 
   json(res, 404, { error: "not found" });
@@ -1030,33 +1184,51 @@ const server = http.createServer(async (req, res) => {
 
 wss = new WebSocketServer({ server });
 const clientSizes = new Map();
-wss.on('connection', ws => {
+wss.on('connection', (ws, req) => {
+  const ctx = authContext(req);
+  if (!ctx) {
+    ws.close(1008, "unauthorized");
+    return;
+  }
+  ws.authContext = ctx;
+  if (ctx.kind === "worker") {
+    workerResizeOwners.set(String(ctx.workerId), ws);
+  }
+
   ws.on('message', raw => {
     try {
       const msg = JSON.parse(raw);
       if (msg.type === 'resize') {
         const size = { cols: msg.cols, rows: msg.rows };
         clientSizes.set(ws, size);
-        if (msg.id && workers.has(String(msg.id))) {
-          const w = workers.get(String(msg.id));
-          w.cols = size.cols;
-          w.rows = size.rows;
+        if (msg.id && workers.has(String(msg.id)) && canAccessWorker(ctx, msg.id)) {
+          setWorkerSize(msg.id, size, ws);
+        } else if (ctx.kind === "full") {
+          setAllUnownedWorkerSizes(size, ws);
         } else {
-          workers.forEach(w => { w.cols = size.cols; w.rows = size.rows; });
+          setWorkerSize(ctx.workerId, size, ws);
         }
       }
       if (msg.type === 'active') {
         const size = clientSizes.get(ws);
-        if (size) workers.forEach(w => { w.cols = size.cols; w.rows = size.rows; });
+        if (size && ctx.kind === "full") {
+          setAllUnownedWorkerSizes(size, ws);
+        } else if (size) {
+          setWorkerSize(ctx.workerId, size, ws);
+        }
       }
     } catch (e) {}
   });
-  ws.on('close', () => clientSizes.delete(ws));
+  ws.on('close', () => {
+    clientSizes.delete(ws);
+    releaseResizeOwnership(ws);
+  });
 
   // 새 클라이언트에게 기존 미리보기 상태 동기화 (리스닝 중인 포트만, 포트 기준 중복 제거)
   if (ws.readyState === 1) {
     const syncedPorts = new Set();
     detectedPorts.forEach((portSet, workerId) => {
+      if (!canAccessWorker(ctx, workerId)) return;
       portSet.forEach(port => {
         if (syncedPorts.has(port)) return;
         syncedPorts.add(port);
@@ -1071,6 +1243,7 @@ wss.on('connection', ws => {
     });
     // 이미 생성된 터널 URL 전송
     previewTunnels.forEach((tunnel, port) => {
+      if (ctx.kind !== "full" && !detectedPorts.get(ctx.workerId)?.has(Number(port))) return;
       if (tunnel.url) {
         ws.send(JSON.stringify({ type: "preview_tunnel", port, url: tunnel.url }));
       }

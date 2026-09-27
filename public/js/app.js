@@ -3,10 +3,21 @@
 function enterApp() {
   document.getElementById('login').style.display = 'none';
   document.getElementById('app').style.display = 'flex';
+  if (scopedWorkerId()) applyScopedMode(scopedWorkerId());
   loadConfig();
   initWS();
   loadAll();
   setLayout(layout);
+}
+
+function applyScopedMode(workerId) {
+  document.body.dataset.scopedWorker = workerId;
+  const toolbar = document.getElementById('spawn-toolbar');
+  const scanBtn = document.getElementById('scan-btn');
+  const spawnBtn = document.getElementById('toggle-toolbar-btn');
+  if (toolbar) toolbar.style.display = 'none';
+  if (scanBtn) scanBtn.style.display = 'none';
+  if (spawnBtn) spawnBtn.style.display = 'none';
 }
 
 function doLogin() {
@@ -23,7 +34,7 @@ function doLogin() {
 }
 
 // 기존 쿠키로 자동 로그인 시도 — 유효하면 로그인 화면 건너뜀
-fetch('/api/workers', { credentials: 'include' }).then(r => {
+fetch(scopedApiUrl('/api/workers'), { credentials: 'include' }).then(r => {
   if (r.ok) enterApp();
 });
 
