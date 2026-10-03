@@ -1070,8 +1070,10 @@ const server = http.createServer(async (req, res) => {
   }
 
   if (method === "POST" && url === "/api/key") {
-    const { id, key } = JSON.parse(await readBody(req));
+    const { id, key, keys } = JSON.parse(await readBody(req));
     if (!canAccessWorker(ctx, id)) return json(res, 403, { ok: false, error: "forbidden" });
+    const keySequence = Array.isArray(keys) ? keys.map(String).filter(Boolean).slice(0, 30) : null;
+    if (keySequence !== null && !keySequence.length) return json(res, 400, { ok: false, error: "empty keys" });
     const w = workers.get(id);
     if (w) {
       if (w.status === "completed") {
@@ -1081,8 +1083,13 @@ const server = http.createServer(async (req, res) => {
         startPolling(id);
         broadcast({ type: "status", id, status: "running", reason: null });
       }
-      rememberAction(w, "special_key", key);
-      tmux(`send-keys -t ${w.sessionName} ${key}`);
+      if (keySequence) {
+        rememberAction(w, "special_key", keySequence.join(" "));
+        tmuxExec(["send-keys", "-t", w.sessionName, ...keySequence]);
+      } else {
+        rememberAction(w, "special_key", key);
+        tmux(`send-keys -t ${w.sessionName} ${key}`);
+      }
     }
     return json(res, 200, { ok: true });
   }

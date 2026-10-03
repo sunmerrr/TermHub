@@ -75,6 +75,7 @@ function ensureCard(id, cwd, status, logs, cmd, reason, title, sessionName) {
     '<div class="card-cwd">' + displayPath(cwd) + '</div>' +
     '<div class="exit-reason" id="exit-reason-' + id + '"></div>' +
     '<div class="logs" id="logs-' + id + '"></div>' +
+    '<div class="choices" id="choices-' + id + '"></div>' +
     '<div class="input-row" id="input-row-' + id + '"' + (status === 'stopped' || status === 'completed' ? ' style="display:none"' : '') + '>' +
       '<textarea id="inp-' + id + '" placeholder="Enter command..." rows="1"></textarea>' +
       '<button id="send-' + id + '">Send</button>' +
@@ -310,12 +311,98 @@ function updateStatus(id, status, reason) {
     });
     document.querySelectorAll('#input-row-' + id).forEach(el => el.style.display = '');
   }
+  refreshTabPriority();
+}
+
+// ── Prompt Choices ──
+// 터미널 하단에 번호 선택 메뉴(❯ 1. Yes / 2. No)나 (y/n) 프롬프트가 보이면
+// 한 번 탭으로 응답할 수 있는 버튼을 입력창 위에 렌더링한다.
+
+const workerAiState = {};
+const lastSnapshotLines = {};
+
+function parseChoices(lines) {
+  // 화면 맨 아래 영역만 본다 — 스크롤백에 남은 옛 메뉴를 다시 띄우지 않기 위함
+  const tail = lines.slice(-14).map(l => l.replace(/\s+$/, '')).filter(l => l.trim() !== '');
+  if (!tail.length) return null;
+
+  const options = [];
+  let selected = -1;
+  tail.forEach(line => {
+    const m = line.match(/^\s*(❯|›|>)?\s*(\d{1,2})\.\s+(.+)$/);
+    if (!m) return;
+    const num = parseInt(m[2], 10);
+    if (num !== options.length + 1) return; // 1부터 연속된 번호만 메뉴로 인정
+    options.push({ num, label: m[3].trim() });
+    if (m[1]) selected = options.length - 1;
+  });
+  // 커서(❯) 위치를 알아야 방향키로 정확히 이동할 수 있다
+  if (options.length >= 2 && selected >= 0) {
+    return {
+      kind: 'menu',
+      items: options.map((o, i) => ({
+        label: o.num + '. ' + trimChoiceLabel(o.label),
+        keys: moveKeys(selected, i).concat(['Enter']),
+        primary: i === selected
+      }))
+    };
+  }
+
+  const last = tail[tail.length - 1];
+  if (/\((y|yes)\/(n|no)\)|\[(y|yes)\/(n|no)\]/i.test(last)) {
+    return {
+      kind: 'yn',
+      items: [
+        { label: 'Yes', keys: ['y', 'Enter'], primary: true },
+        { label: 'No', keys: ['n', 'Enter'], primary: false }
+      ]
+    };
+  }
+  return null;
+}
+
+function trimChoiceLabel(text) {
+  const clean = text.replace(/\s*\((esc|enter|tab)[^)]*\)\s*$/i, '').trim();
+  return clean.length > 42 ? clean.slice(0, 41) + '…' : clean;
+}
+
+function moveKeys(from, to) {
+  const keys = [];
+  const key = to > from ? 'Down' : 'Up';
+  for (let i = 0; i < Math.abs(to - from); i++) keys.push(key);
+  return keys;
+}
+
+function updateChoices(id) {
+  const lines = lastSnapshotLines[id];
+  const choices = workerAiState[id] === 'waiting' && lines ? parseChoices(lines) : null;
+  document.querySelectorAll('#choices-' + id).forEach(box => {
+    box.innerHTML = '';
+    if (!choices) { box.classList.remove('show'); return; }
+    choices.items.forEach(item => {
+      const btn = document.createElement('button');
+      btn.className = 'choice-btn' + (item.primary ? ' primary' : '');
+      btn.textContent = item.label;
+      btn.addEventListener('click', () => {
+        // 중복 클릭 방지: 다음 스냅샷이 오기 전까지 버튼을 치운다
+        document.querySelectorAll('#choices-' + id).forEach(b => { b.innerHTML = ''; b.classList.remove('show'); });
+        sendKeys(id, item.keys);
+      });
+      box.appendChild(btn);
+    });
+    box.classList.add('show');
+  });
 }
 
 function updateAIState(id, state) {
+  workerAiState[id] = state;
+  updateChoices(id);
   // Skip if worker is stopped/completed
   var badge = document.querySelector('#badge-' + id);
-  if (badge && (badge.classList.contains('stopped') || badge.classList.contains('completed'))) return;
+  if (badge && (badge.classList.contains('stopped') || badge.classList.contains('completed'))) {
+    refreshTabPriority();
+    return;
+  }
 
   document.querySelectorAll('#tab-dot-' + id).forEach(function(el) {
     el.classList.remove('ai-idle', 'ai-waiting');
@@ -335,6 +422,7 @@ function updateAIState(id, state) {
       el.textContent = 'running';
     }
   });
+  refreshTabPriority();
 }
 
 function removeWorker(id) {
@@ -358,6 +446,7 @@ function removeWorker(id) {
   const card = document.getElementById('card-' + id);
   if (card) card.remove();
   updateSplitGrid();
+  refreshTabPriority();
 }
 
 function updateCwd(id, cwd) {
@@ -423,6 +512,11 @@ function shareWorkerUrl(id, btn) {
 function sendSpecialKey(id, key) {
   notifyActive();
   apiPost('/api/key', { id, key });
+}
+
+function sendKeys(id, keys) {
+  notifyActive();
+  apiPost('/api/key', { id, keys });
 }
 
 function sendInput(id) {

@@ -288,6 +288,19 @@ header h1 {
   opacity: 0.4;
 }
 
+.tab.waiting {
+  background: #d2992214;
+  color: #e6edf3;
+}
+
+.tab.waiting.active {
+  border-bottom-color: #d29922;
+}
+
+#tab-bar.reordering .tab {
+  order: 0 !important;
+}
+
 #tab-drop-indicator {
   position: absolute;
   top: 4px;
@@ -526,6 +539,45 @@ header h1 {
   font-size: 13px;
   padding: 6px 12px;
   cursor: pointer;
+}
+
+/* ── Prompt Choices ────────────────────────────────── */
+
+.choices {
+  display: none;
+  flex-wrap: wrap;
+  gap: 6px;
+  padding: 6px 8px;
+  border-top: 1px solid #30363d;
+  background: #1c2128;
+  flex-shrink: 0;
+}
+
+.choices.show {
+  display: flex;
+}
+
+.choice-btn {
+  background: #21262d;
+  border: 1px solid #30363d;
+  border-radius: 6px;
+  color: #e6edf3;
+  font-size: 12px;
+  padding: 6px 12px;
+  cursor: pointer;
+  max-width: 100%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.choice-btn:hover {
+  background: #30363d;
+}
+
+.choice-btn.primary {
+  border-color: #d29922;
+  color: #f2cc60;
 }
 
 /* ── Toolkit Popup ─────────────────────────────────── */

@@ -32,6 +32,20 @@ function updateSplitGrid() {
   sc.style.gridTemplateRows = `repeat(${rows}, 1fr)`;
 }
 
+// 대기(waiting)·핀 탭은 CSS order로만 앞당긴다 — DOM 순서(드래그 정렬)는 그대로 둬서
+// 상태가 풀리면 원래 자리로 돌아간다. 브라우저 탭 제목에도 대기 개수를 표시한다.
+function refreshTabPriority() {
+  let waiting = 0;
+  document.querySelectorAll('#tab-bar .tab').forEach(tab => {
+    const isWaiting = !!tab.querySelector('.tab-dot.ai-waiting');
+    const isPinned = tab.dataset.pinned === '1';
+    tab.classList.toggle('waiting', isWaiting);
+    tab.style.order = isPinned ? -2 : (isWaiting ? -1 : 0);
+    if (isWaiting) waiting++;
+  });
+  document.title = waiting ? '(' + waiting + ') TermHub' : 'TermHub';
+}
+
 function selectTab(id) {
   activeTab = id;
   document.querySelectorAll('.tab').forEach(t => t.classList.toggle('active', t.dataset.id === id));
@@ -55,11 +69,14 @@ function bindTabDrag(tab) {
   tab.draggable = true;
   tab.addEventListener('dragstart', e => {
     tab.classList.add('dragging');
+    // 드래그 중에는 order 우선순위를 끄고 DOM 순서 그대로 보여야 드롭 위치가 맞는다
+    tabBar.classList.add('reordering');
     e.dataTransfer.effectAllowed = 'move';
     e.dataTransfer.setData('text/plain', tab.dataset.id);
   });
   tab.addEventListener('dragend', () => {
     tab.classList.remove('dragging');
+    tabBar.classList.remove('reordering');
   });
 }
 

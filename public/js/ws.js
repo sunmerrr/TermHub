@@ -41,6 +41,8 @@ function handleMsg(d) {
   if (d.type === 'preview_tunnel') updatePreviewTunnel(d.port, d.url);
   if (d.type === 'preview_closed') closePreview(d.workerId, d.port);
   if (d.type === 'snapshot') {
+    lastSnapshotLines[d.id] = d.lines;
+    updateChoices(d.id);
     document.querySelectorAll('#logs-' + d.id).forEach(box => {
       var wasAtBottom = isNearBottom(box);
       box.innerHTML = '';
