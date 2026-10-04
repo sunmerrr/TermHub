@@ -54,7 +54,12 @@ function handleMsg(d) {
         box.appendChild(line);
       });
       if (wasAtBottom) box.scrollTop = box.scrollHeight;
+      else updateJumpButton(box, true);
     });
+  }
+  if (d.type === 'presets') {
+    presets = Array.isArray(d.presets) ? d.presets : [];
+    renderPresets();
   }
 }
 

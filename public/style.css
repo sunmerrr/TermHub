@@ -467,15 +467,49 @@ header h1 {
 
 /* ── Log Output ────────────────────────────────────── */
 
+.logs-wrap {
+  position: relative;
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+}
+
 .logs {
   font-family: "SF Mono", monospace;
-  font-size: 12px;
+  font-size: var(--log-font, 12px);
   padding: 8px;
   overflow-y: auto;
   background: #0d1117;
   flex: 1;
   min-height: 100px;
   resize: vertical;
+  /* 두 손가락 핀치는 브라우저 줌 대신 로그 글자 크기 조절에 쓴다 */
+  touch-action: pan-x pan-y;
+}
+
+.jump-bottom {
+  display: none;
+  position: absolute;
+  right: 14px;
+  bottom: 10px;
+  background: #21262dee;
+  border: 1px solid #30363d;
+  border-radius: 14px;
+  color: #e6edf3;
+  font-size: 12px;
+  padding: 5px 12px;
+  cursor: pointer;
+  box-shadow: 0 4px 12px #0008;
+}
+
+.jump-bottom.show {
+  display: block;
+}
+
+.jump-bottom.has-new {
+  border-color: #1f6feb;
+  color: #79c0ff;
 }
 
 .log-line {
@@ -641,9 +675,99 @@ header h1 {
 
 .key-grid {
   display: grid;
-  grid-template-columns: repeat(4, 1fr);
+  grid-template-columns: repeat(3, 1fr);
   gap: 4px;
   width: 200px;
+}
+
+.tk-label-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-top: 8px;
+}
+
+.tk-edit {
+  background: none;
+  border: none;
+  color: #8b949e;
+  font-size: 11px;
+  cursor: pointer;
+  padding: 0 2px;
+}
+
+.presets-editing .tk-edit {
+  color: #f2cc60;
+}
+
+.preset-list {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+  width: 200px;
+}
+
+.preset-chip {
+  background: #161b22;
+  border: 1px solid #30363d;
+  border-radius: 12px;
+  color: #c9d1d9;
+  font-size: 11px;
+  padding: 4px 10px;
+  cursor: pointer;
+  max-width: 100%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.preset-chip:hover {
+  background: #21262d;
+  color: #e6edf3;
+}
+
+.preset-chip .preset-del {
+  display: none;
+  margin-left: 6px;
+  color: #f85149;
+}
+
+.presets-editing .preset-chip .preset-del {
+  display: inline;
+}
+
+.presets-editing .preset-chip:not(.preset-add) {
+  border-color: #f8514966;
+}
+
+.preset-add {
+  color: #3fb950;
+  border-style: dashed;
+}
+
+/* 공유(scoped) 접속은 프리셋을 쓸 수만 있고 편집은 못 한다 */
+body[data-scoped-worker] .tk-edit,
+body[data-scoped-worker] .preset-add {
+  display: none;
+}
+
+.font-ctrl {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  width: 200px;
+}
+
+.font-ctrl .key-btn {
+  flex: 1;
+  text-align: center;
+}
+
+.font-size-label {
+  font-size: 11px;
+  color: #8b949e;
+  min-width: 36px;
+  text-align: center;
 }
 
 .key-grid .key-btn {

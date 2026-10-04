@@ -132,6 +132,13 @@ function setSessionTitle(sessionName, title) {
   return trimmed;
 }
 
+const DEFAULT_PRESETS = ["계속해", "/compact"];
+
+function getPresets() {
+  const saved = loadState().presets;
+  return Array.isArray(saved) ? saved : DEFAULT_PRESETS;
+}
+
 function getBaseCommand(cmd) {
   if (!cmd) return "";
   return String(cmd).trim().split(/\s+/)[0] || "";
@@ -961,7 +968,7 @@ function canReceiveMessage(ctx, obj) {
   if (obj.type === "preview_tunnel") {
     return detectedPorts.get(workerId)?.has(Number(obj.port)) || false;
   }
-  return ["spawned", "log", "status", "cwd", "aiState", "snapshot", "title", "preview_detected", "preview_prompt", "preview_closed"].includes(obj.type);
+  return ["spawned", "log", "status", "cwd", "aiState", "snapshot", "title", "presets", "preview_detected", "preview_prompt", "preview_closed"].includes(obj.type);
 }
 
 function canAccessWorker(ctx, workerId) {
@@ -1261,6 +1268,22 @@ const server = http.createServer(async (req, res) => {
     const { id } = JSON.parse(await readBody(req));
     killWorker(id, "Stopped from dashboard (Stop button).");
     return json(res, 200, { ok: true });
+  }
+
+  if (method === "GET" && url === "/api/presets") {
+    return json(res, 200, { presets: getPresets() });
+  }
+
+  if (method === "POST" && url === "/api/presets") {
+    if (ctx.kind !== "full") return json(res, 403, { error: "forbidden" });
+    const body = JSON.parse(await readBody(req));
+    if (!Array.isArray(body.presets)) return json(res, 400, { ok: false, error: "presets must be an array" });
+    const cleaned = [...new Set(body.presets.map((t) => String(t).trim().slice(0, 500)).filter(Boolean))].slice(0, 30);
+    const state = loadState();
+    state.presets = cleaned;
+    saveState(state);
+    broadcast({ type: "presets", presets: cleaned });
+    return json(res, 200, { ok: true, presets: cleaned });
   }
 
   if (method === "GET" && url === "/api/push/public-key") {

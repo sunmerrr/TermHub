@@ -74,7 +74,10 @@ function ensureCard(id, cwd, status, logs, cmd, reason, title, sessionName) {
     '</div>' +
     '<div class="card-cwd">' + displayPath(cwd) + '</div>' +
     '<div class="exit-reason" id="exit-reason-' + id + '"></div>' +
-    '<div class="logs" id="logs-' + id + '"></div>' +
+    '<div class="logs-wrap">' +
+      '<div class="logs" id="logs-' + id + '"></div>' +
+      '<button class="jump-bottom" id="jump-' + id + '" title="맨 아래로">↓</button>' +
+    '</div>' +
     '<div class="choices" id="choices-' + id + '"></div>' +
     '<div class="input-row" id="input-row-' + id + '"' + (status === 'stopped' || status === 'completed' ? ' style="display:none"' : '') + '>' +
       '<textarea id="inp-' + id + '" placeholder="Enter command..." rows="1"></textarea>' +
@@ -91,6 +94,16 @@ function ensureCard(id, cwd, status, logs, cmd, reason, title, sessionName) {
             '<button class="key-btn" id="key-tab-' + id + '">tab</button>' +
             '<button class="key-btn" id="key-stab-' + id + '">⇧tab</button>' +
             '<button class="key-btn" id="key-ctrlc-' + id + '">⌃c</button>' +
+            '<button class="key-btn" id="key-ctrlc2-' + id + '" title="⌃c 두 번 (종료)">⌃c×2</button>' +
+            '<button class="key-btn" id="key-slash-' + id + '" title="슬래시 명령 자동완성">/</button>' +
+          '</div>' +
+          '<div class="tk-label tk-label-row">Quick<button class="tk-edit" id="tk-edit-' + id + '" title="빠른 입력 편집">✎</button></div>' +
+          '<div class="preset-list" id="presets-' + id + '"></div>' +
+          '<div class="tk-label">Text size</div>' +
+          '<div class="font-ctrl">' +
+            '<button class="key-btn" id="font-dec-' + id + '">A−</button>' +
+            '<span class="font-size-label">' + logFontSize + 'px</span>' +
+            '<button class="key-btn" id="font-inc-' + id + '">A+</button>' +
           '</div>' +
         '</div>' +
       '</div>' +
@@ -222,6 +235,164 @@ function bindCard(id, root) {
     const btn = q('#key-' + btnId + '-' + id);
     if (btn) btn.addEventListener('click', () => sendSpecialKey(id, tmuxKey));
   });
+  const slashBtn = q('#key-slash-' + id);
+  if (slashBtn) slashBtn.addEventListener('click', () => sendKeys(id, ['/']));
+  const ctrlc2Btn = q('#key-ctrlc2-' + id);
+  if (ctrlc2Btn) ctrlc2Btn.addEventListener('click', () => sendKeys(id, ['C-c', 'C-c']));
+
+  // Quick presets
+  const editBtn = q('#tk-edit-' + id);
+  if (editBtn) editBtn.addEventListener('click', e => {
+    e.stopPropagation();
+    const editing = !document.body.classList.contains('presets-editing');
+    document.body.classList.toggle('presets-editing', editing);
+  });
+  renderPresets();
+
+  // Text size
+  const decBtn = q('#font-dec-' + id);
+  const incBtn = q('#font-inc-' + id);
+  if (decBtn) decBtn.addEventListener('click', e => { e.stopPropagation(); applyLogFontSize(logFontSize - 1, true); });
+  if (incBtn) incBtn.addEventListener('click', e => { e.stopPropagation(); applyLogFontSize(logFontSize + 1, true); });
+
+  const logs = q('#logs-' + id);
+  const jumpBtn = q('#jump-' + id);
+  if (logs) {
+    bindPinchZoom(logs);
+    logs.addEventListener('scroll', () => updateJumpButton(logs));
+  }
+  if (jumpBtn && logs) {
+    jumpBtn.addEventListener('click', () => {
+      logs.scrollTop = logs.scrollHeight;
+      updateJumpButton(logs);
+    });
+  }
+}
+
+// ── Quick Presets (서버 저장, 모든 기기 공유) ──
+
+let presets = [];
+
+function loadPresets() {
+  apiGet('/api/presets').then(d => {
+    if (!d) return;
+    presets = Array.isArray(d.presets) ? d.presets : [];
+    renderPresets();
+  }).catch(() => {});
+}
+
+function savePresets(next) {
+  presets = next;
+  renderPresets();
+  apiPost('/api/presets', { presets: next });
+}
+
+function renderPresets() {
+  document.querySelectorAll('.preset-list').forEach(list => {
+    const id = list.id.replace('presets-', '');
+    list.innerHTML = '';
+    presets.forEach((text, idx) => {
+      const chip = document.createElement('button');
+      chip.className = 'preset-chip';
+      chip.textContent = text;
+      chip.title = text;
+      const del = document.createElement('span');
+      del.className = 'preset-del';
+      del.textContent = '✕';
+      chip.appendChild(del);
+      chip.addEventListener('click', e => {
+        e.stopPropagation();
+        if (document.body.classList.contains('presets-editing')) {
+          savePresets(presets.filter((_, i) => i !== idx));
+          return;
+        }
+        closeToolkitPopups();
+        notifyActive();
+        apiPost('/api/input', { id, text });
+      });
+      list.appendChild(chip);
+    });
+    const add = document.createElement('button');
+    add.className = 'preset-chip preset-add';
+    add.textContent = '+';
+    add.title = '빠른 입력 추가';
+    add.addEventListener('click', e => {
+      e.stopPropagation();
+      const text = prompt('빠른 입력 문구');
+      if (text === null) return;
+      const trimmed = text.trim();
+      if (!trimmed || presets.includes(trimmed)) return;
+      savePresets(presets.concat([trimmed]));
+    });
+    list.appendChild(add);
+  });
+}
+
+function closeToolkitPopups() {
+  document.querySelectorAll('.toolkit-popup.open').forEach(p => {
+    p.classList.remove('open');
+    p.previousElementSibling.classList.remove('open');
+  });
+  document.body.classList.remove('presets-editing');
+}
+
+// ── Log Text Size (기기별 설정) ──
+
+const LOG_FONT_MIN = 8;
+const LOG_FONT_MAX = 24;
+let logFontSize = (function() {
+  const saved = parseInt(localStorage.getItem('logFontSize'), 10);
+  return saved >= LOG_FONT_MIN && saved <= LOG_FONT_MAX ? saved : 12;
+})();
+document.documentElement.style.setProperty('--log-font', logFontSize + 'px');
+
+function applyLogFontSize(px, resize) {
+  const next = Math.min(LOG_FONT_MAX, Math.max(LOG_FONT_MIN, Math.round(px)));
+  if (next === logFontSize && !resize) return;
+  logFontSize = next;
+  document.documentElement.style.setProperty('--log-font', next + 'px');
+  localStorage.setItem('logFontSize', String(next));
+  document.querySelectorAll('.font-size-label').forEach(el => { el.textContent = next + 'px'; });
+  // 글자 크기가 바뀌면 터미널 cols/rows도 달라진다
+  if (resize) sendResize();
+}
+
+function bindPinchZoom(box) {
+  let startDist = 0;
+  let startSize = 0;
+  const dist = t => Math.hypot(t[0].clientX - t[1].clientX, t[0].clientY - t[1].clientY);
+  box.addEventListener('touchstart', e => {
+    if (e.touches.length !== 2) return;
+    startDist = dist(e.touches);
+    startSize = logFontSize;
+  }, { passive: true });
+  box.addEventListener('touchmove', e => {
+    if (e.touches.length !== 2 || !startDist) return;
+    e.preventDefault();
+    applyLogFontSize(startSize * (dist(e.touches) / startDist), false);
+  }, { passive: false });
+  box.addEventListener('touchend', () => {
+    if (!startDist) return;
+    startDist = 0;
+    applyLogFontSize(logFontSize, true);
+  });
+}
+
+// ── Jump to Bottom ──
+
+function updateJumpButton(box, hasNew) {
+  const btn = box.parentElement && box.parentElement.querySelector('.jump-bottom');
+  if (!btn) return;
+  if (isNearBottom(box)) {
+    btn.classList.remove('show', 'has-new');
+    btn.textContent = '↓';
+    return;
+  }
+  btn.classList.add('show');
+  if (hasNew) {
+    btn.classList.add('has-new');
+    btn.textContent = '↓ 새 출력';
+  }
 }
 
 // ── Logs ──
@@ -238,6 +409,7 @@ function appendLog(id, src, text) {
     line.textContent = text;
     box.appendChild(line);
     if (wasAtBottom) box.scrollTop = box.scrollHeight;
+    else updateJumpButton(box, true);
   });
 }
 
