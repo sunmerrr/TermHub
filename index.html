@@ -4,6 +4,11 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
 <title>TermHub</title>
+<link rel="manifest" href="/manifest.json">
+<link rel="apple-touch-icon" href="/icon-192.png">
+<meta name="theme-color" content="#161b22">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
 <link rel="stylesheet" href="/style.css?v=4">
 <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/diff2html/bundles/css/diff2html.min.css" />
 </head>
@@ -25,6 +30,7 @@
       <button id="layout-split-btn" class="header-btn">Split</button>
     </div>
     <div class="header-divider"></div>
+    <button id="push-btn" class="header-btn" style="display:none">🔕</button>
     <button id="scan-btn" class="header-btn">🔍</button>
     <button id="toggle-toolbar-btn" class="header-btn accent">+</button>
   </header>
@@ -61,6 +67,7 @@
 <script src="/js/favorites.js?v=5"></script>
 <script src="/js/ws.js?v=6"></script>
 <script src="/js/preview.js?v=6"></script>
+<script src="/js/push.js?v=1"></script>
 <script src="https://cdn.jsdelivr.net/npm/diff2html/bundles/js/diff2html-ui-slim.min.js"></script>
 <script src="/js/git-diff.js?v=5"></script>
 <script src="/js/workers.js?v=6"></script>

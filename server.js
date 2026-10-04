@@ -610,9 +610,90 @@ function sendIssueAlert({ key, title, description, color = 0xf0ad4e, fields = []
   });
 }
 
+// ── Web Push ──
+// web-push가 설치되지 않은 환경에서도 서버는 떠야 하므로 선택적 로드
+let webpush = null;
+try {
+  webpush = require("web-push");
+} catch (e) {
+  console.warn("🔕 web-push not installed — push notifications disabled (run npm install)");
+}
+const PUSH_CONTACT = process.env.PUSH_CONTACT || "mailto:admin@localhost";
+const PUSH_COOLDOWN_MS = Number(process.env.PUSH_COOLDOWN_MS || 60000);
+const PUSH_MAX_SUBSCRIPTIONS = 20;
+const pushAlertTime = new Map(); // workerId → timestamp
+
+function initPush() {
+  if (!webpush) return;
+  const state = loadState();
+  if (!state.vapid) {
+    state.vapid = webpush.generateVAPIDKeys();
+    saveState(state);
+    console.log("🔔 Generated VAPID keys for Web Push");
+  }
+  webpush.setVapidDetails(PUSH_CONTACT, state.vapid.publicKey, state.vapid.privateKey);
+}
+
+function getPushPublicKey() {
+  return loadState().vapid?.publicKey || null;
+}
+
+function addPushSubscription(subscription) {
+  const state = loadState();
+  const list = (state.pushSubscriptions || []).filter((s) => s.endpoint !== subscription.endpoint);
+  list.push(subscription);
+  state.pushSubscriptions = list.slice(-PUSH_MAX_SUBSCRIPTIONS);
+  saveState(state);
+  return state.pushSubscriptions.length;
+}
+
+function removePushSubscription(endpoint) {
+  const state = loadState();
+  state.pushSubscriptions = (state.pushSubscriptions || []).filter((s) => s.endpoint !== endpoint);
+  saveState(state);
+}
+
+function sendPushToAll(payload) {
+  if (!webpush) return;
+  const subs = loadState().pushSubscriptions || [];
+  const body = JSON.stringify(payload);
+  for (const sub of subs) {
+    webpush.sendNotification(sub, body, { TTL: 600 }).catch((err) => {
+      // 404/410: 구독이 만료되었거나 사용자가 해제함 → 목록에서 제거
+      if (err.statusCode === 404 || err.statusCode === 410) {
+        removePushSubscription(sub.endpoint);
+      } else {
+        console.error("Push failed:", err.statusCode || "", err.message);
+      }
+    });
+  }
+}
+
+function waitingQuestion(w) {
+  const lines = (w.logs || []).slice(-10).map((l) => l.text.trim()).filter(Boolean);
+  const question = [...lines].reverse().find((l) => /\?/.test(l) && !/^[❯›>\d]/.test(l));
+  return (question || "입력/승인이 필요합니다.").slice(0, 120);
+}
+
+function sendWaitingPush(id) {
+  const w = workers.get(id);
+  if (!w || !webpush) return;
+  const now = Date.now();
+  if (now - (pushAlertTime.get(id) || 0) < PUSH_COOLDOWN_MS) return;
+  pushAlertTime.set(id, now);
+  const label = w.title || `${w.cmd || "claude"} · ${path.basename(w.cwd || "")}`;
+  sendPushToAll({
+    title: `#${id} ${label} — 대기 중`,
+    body: waitingQuestion(w),
+    tag: `worker-${id}`,
+    data: { workerId: id, url: `/?focus=${encodeURIComponent(id)}` },
+  });
+}
+
 function sendWaitingAlert(id) {
   const w = workers.get(id);
   if (!w) return;
+  sendWaitingPush(id);
 
   // 쿨다운은 sendIssueAlert의 ISSUE_ALERT_COOLDOWN_MS(120초)에서 일괄 관리
   sendIssueAlert({
@@ -954,13 +1035,16 @@ const server = http.createServer(async (req, res) => {
     return res.end(html);
   }
 
-  const MIME = { ".css": "text/css", ".js": "application/javascript" };
+  const MIME = { ".css": "text/css", ".js": "application/javascript", ".json": "application/json", ".png": "image/png" };
   const ext = path.extname(url);
   if (method === "GET" && MIME[ext]) {
     const safePath = path.normalize(url).replace(/^(\.\.[\/\\])+/, '');
     const filePath = path.join(__dirname, "public", safePath);
     if (filePath.startsWith(path.join(__dirname, "public")) && fs.existsSync(filePath)) {
-      res.writeHead(200, { "Content-Type": MIME[ext] + "; charset=utf-8" });
+      const headers = { "Content-Type": ext === ".png" ? MIME[ext] : MIME[ext] + "; charset=utf-8" };
+      // 서비스 워커는 루트 스코프 허용 + 항상 최신 버전 사용
+      if (url === "/sw.js") { headers["Service-Worker-Allowed"] = "/"; headers["Cache-Control"] = "no-cache"; }
+      res.writeHead(200, headers);
       return res.end(fs.readFileSync(filePath));
     }
   }
@@ -1176,6 +1260,36 @@ const server = http.createServer(async (req, res) => {
     if (ctx.kind !== "full") return json(res, 403, { error: "forbidden" });
     const { id } = JSON.parse(await readBody(req));
     killWorker(id, "Stopped from dashboard (Stop button).");
+    return json(res, 200, { ok: true });
+  }
+
+  if (method === "GET" && url === "/api/push/public-key") {
+    if (ctx.kind !== "full") return json(res, 403, { error: "forbidden" });
+    const publicKey = getPushPublicKey();
+    return json(res, 200, { enabled: !!(webpush && publicKey), publicKey });
+  }
+
+  if (method === "POST" && url === "/api/push/subscribe") {
+    if (ctx.kind !== "full") return json(res, 403, { error: "forbidden" });
+    if (!webpush) return json(res, 503, { ok: false, error: "web-push not installed" });
+    const { subscription } = JSON.parse(await readBody(req));
+    if (!subscription || typeof subscription.endpoint !== "string" || !subscription.keys?.p256dh || !subscription.keys?.auth) {
+      return json(res, 400, { ok: false, error: "invalid subscription" });
+    }
+    const count = addPushSubscription({ endpoint: subscription.endpoint, keys: { p256dh: subscription.keys.p256dh, auth: subscription.keys.auth } });
+    return json(res, 200, { ok: true, count });
+  }
+
+  if (method === "POST" && url === "/api/push/unsubscribe") {
+    if (ctx.kind !== "full") return json(res, 403, { error: "forbidden" });
+    const { endpoint } = JSON.parse(await readBody(req));
+    if (typeof endpoint === "string") removePushSubscription(endpoint);
+    return json(res, 200, { ok: true });
+  }
+
+  if (method === "POST" && url === "/api/push/test") {
+    if (ctx.kind !== "full") return json(res, 403, { error: "forbidden" });
+    sendPushToAll({ title: "TermHub", body: "푸시 알림 테스트", tag: "termhub-test", data: { url: "/" } });
     return json(res, 200, { ok: true });
   }
 
@@ -1470,6 +1584,7 @@ function checkTunnel() {
 
 server.listen(PORT, () => {
   recoverSessions();
+  initPush();
   console.log(`✅ TermHub running → http://localhost:${PORT}`);
   console.log(`🔑 Password: ${PASSWORD}`);
   console.log(`📺 View tmux session: tmux attach -t term-1`);

@@ -6,8 +6,19 @@ function enterApp() {
   if (scopedWorkerId()) applyScopedMode(scopedWorkerId());
   loadConfig();
   initWS();
-  loadAll();
+  loadAll().then(() => {
+    // 푸시 알림 클릭 등으로 ?focus=ID 진입 시 해당 워커 탭을 연다
+    const params = new URLSearchParams(location.search);
+    const focus = params.get('focus');
+    if (focus && typeof focusWorker === 'function') {
+      focusWorker(focus);
+      params.delete('focus');
+      const rest = params.toString();
+      history.replaceState(null, '', location.pathname + (rest ? '?' + rest : ''));
+    }
+  });
   setLayout(layout);
+  if (typeof initPush === 'function') initPush();
 }
 
 function applyScopedMode(workerId) {
@@ -15,9 +26,11 @@ function applyScopedMode(workerId) {
   const toolbar = document.getElementById('spawn-toolbar');
   const scanBtn = document.getElementById('scan-btn');
   const spawnBtn = document.getElementById('toggle-toolbar-btn');
+  const pushBtn = document.getElementById('push-btn');
   if (toolbar) toolbar.style.display = 'none';
   if (scanBtn) scanBtn.style.display = 'none';
   if (spawnBtn) spawnBtn.style.display = 'none';
+  if (pushBtn) pushBtn.style.display = 'none';
 }
 
 function doLogin() {
@@ -58,6 +71,7 @@ document.getElementById('spawn-btn').addEventListener('click', () => {
   document.getElementById('spawn-toolbar').style.display = 'none';
 });
 document.getElementById('scan-btn').addEventListener('click', scanSessions);
+document.getElementById('push-btn').addEventListener('click', togglePush);
 document.getElementById('add-fav-btn').addEventListener('click', addFavorite);
 document.getElementById('layout-tab-btn').addEventListener('click', () => setLayout('tab'));
 document.getElementById('layout-split-btn').addEventListener('click', () => setLayout('split'));

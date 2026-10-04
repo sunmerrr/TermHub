@@ -130,7 +130,7 @@ function apiGet(url) {
 }
 
 function loadAll() {
-  apiGet('/api/workers')
+  return apiGet('/api/workers')
     .then(list => {
       if (!list) return;
       const activeIds = new Set(list.map(w => String(w.id)));
