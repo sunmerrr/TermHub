@@ -109,6 +109,11 @@ DISCORD_WEBHOOK=https://discord.com/api/webhooks/your/webhook-url
 
 > **Note:** `trycloudflare.com` URLs are temporary. They change on every restart.
 
+4. (Optional) **Push notifications** — when a worker is waiting for input or approval, TermHub can push a notification to your phone or desktop. Open the dashboard over HTTPS (the tunnel URL), press the bell (🔕) in the header and allow notifications. VAPID keys are generated automatically on first start and stored in `.termhub-state.json`.
+
+   - iOS: add the dashboard to the home screen first (Share → Add to Home Screen); Safari only delivers push to installed web apps.
+   - Optional `.env` settings: `PUSH_CONTACT=mailto:you@example.com` (sent to the push service), `PUSH_COOLDOWN_MS=60000` (minimum interval per worker).
+
 ### Option B. ngrok
 
 1. Install

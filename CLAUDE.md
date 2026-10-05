@@ -46,7 +46,7 @@ Config files: `.env` (PORT, DASHBOARD_PASSWORD), `config.json` (basePath, favori
 
 ## Key Conventions
 
-- Minimal dependencies (only dotenv, ws)
+- Minimal dependencies (only dotenv, ws, web-push)
 - Native APIs, no frameworks
 - Worker IDs are auto-incrementing integers, session names follow `term-{id}` pattern
 - API endpoints use `/api/{resource}` format

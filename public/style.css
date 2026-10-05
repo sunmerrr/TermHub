@@ -410,6 +410,45 @@ header h1 {
   font-weight: 600;
 }
 
+.tpl-item .tpl-name {
+  color: #e6edf3;
+  font-weight: 600;
+}
+
+.tpl-item .tpl-detail {
+  color: #8b949e;
+  font-size: 11px;
+}
+
+.card-meta {
+  font-size: 10px;
+  color: #8b949e;
+  white-space: nowrap;
+  flex-shrink: 0;
+}
+
+.pin-btn {
+  background: #21262d;
+  border: 1px solid #30363d;
+  border-radius: 5px;
+  font-size: 11px;
+  padding: 2px 6px;
+  cursor: pointer;
+  filter: grayscale(1);
+  opacity: 0.6;
+}
+
+.pin-btn:hover {
+  background: #30363d;
+  opacity: 1;
+}
+
+.pin-btn.on {
+  filter: none;
+  opacity: 1;
+  border-color: #d29922;
+}
+
 .card-cwd {
   font-size: 11px;
   color: #8b949e;
@@ -721,7 +760,27 @@ header h1 {
   white-space: nowrap;
 }
 
-.preset-chip:hover {
+/* .input-row button(파란 Send 스타일)보다 우선해야 하므로 선택자를 더 구체적으로 */
+.input-row .preset-chip,
+.input-row .tk-edit {
+  background: #161b22;
+  color: #c9d1d9;
+  font-size: 11px;
+  padding: 4px 10px;
+}
+
+.input-row .tk-edit {
+  background: none;
+  color: #8b949e;
+  padding: 0 2px;
+}
+
+.input-row .preset-add {
+  color: #3fb950;
+}
+
+.preset-chip:hover,
+.input-row .preset-chip:hover {
   background: #21262d;
   color: #e6edf3;
 }
@@ -1304,6 +1363,10 @@ body[data-scoped-worker] .preset-add {
   .preview-btn {
     font-size: 10px;
     padding: 2px 6px;
+  }
+
+  .card-meta {
+    display: none;
   }
 
   /* 모바일: 분할 뷰 숨김 — 별도 탭 방식 유지 */

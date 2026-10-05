@@ -53,10 +53,90 @@ function closeDropdown() {
   document.getElementById('dir-dropdown').classList.remove('open');
 }
 
+// ── Templates (경로 + 명령 + 환경변수 묶음, 서버 저장) ──
+
+let templates = [];
+
+function loadTemplates() {
+  apiGet('/api/templates').then(d => {
+    if (!d || !Array.isArray(d.templates)) return;
+    templates = d.templates;
+    renderDropdown();
+  }).catch(() => {});
+}
+
+function saveTemplates(next) {
+  templates = next;
+  renderDropdown();
+  apiPost('/api/templates', { templates: next });
+}
+
+function parseEnvInput(text) {
+  const env = {};
+  for (const m of (text || '').matchAll(/([A-Za-z_][A-Za-z0-9_]*)=(\S*)/g)) env[m[1]] = m[2];
+  return env;
+}
+
+function saveCurrentAsTemplate() {
+  const raw = document.getElementById('cwd-input').value.trim();
+  const base = window._basePath || '/tmp';
+  const cwd = raw ? (raw.startsWith('/') ? raw : base + '/' + raw) : base;
+  const cmd = document.getElementById('cmd-input').value.trim() || 'claude';
+  const folder = cwd.replace(/\/$/, '').split('/').pop() || cwd;
+  const name = prompt('Template name', folder);
+  if (name === null || !name.trim()) return;
+  const envText = prompt('환경변수 (KEY=VAL, 공백으로 구분 · 없으면 비워두기)', '');
+  if (envText === null) return;
+  saveTemplates(templates.filter(t => t.name !== name.trim()).concat([{ name: name.trim(), cwd, cmd, env: parseEnvInput(envText) }]));
+  closeDropdown();
+}
+
+function removeTemplate(idx) {
+  const t = templates[idx];
+  if (!t || !confirm('Delete template "' + t.name + '"?')) return;
+  saveTemplates(templates.filter((_, i) => i !== idx));
+}
+
+function spawnFromTemplate(idx) {
+  const t = templates[idx];
+  if (!t) return;
+  closeDropdown();
+  document.getElementById('spawn-toolbar').style.display = 'none';
+  spawnWorkerRequest({ cwd: t.cwd, cmd: t.cmd, env: t.env || {} });
+}
+
 function renderDropdown() {
   const fl = document.getElementById('fav-list');
   const rl = document.getElementById('recent-list');
+  const tl = document.getElementById('tpl-list');
   if (!fl) return;
+
+  if (tl) {
+    tl.innerHTML = '';
+    if (!templates.length) {
+      tl.innerHTML = '<div style="padding:8px 10px;font-size:12px;color:#8b949e">None</div>';
+    }
+    templates.forEach((t, idx) => {
+      const item = document.createElement('div');
+      item.className = 'dir-item tpl-item';
+      const envKeys = Object.keys(t.env || {});
+      const main = document.createElement('span');
+      main.style.cssText = 'flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap';
+      main.innerHTML = '<span class="tpl-name"></span><span class="tpl-detail"></span>';
+      main.querySelector('.tpl-name').textContent = t.name;
+      main.querySelector('.tpl-detail').textContent = ' ' + (t.cmd || 'claude') + ' · ' + displayPath(t.cwd) + (envKeys.length ? ' · env ' + envKeys.length : '');
+      main.title = (t.cmd || 'claude') + '\n' + t.cwd + (envKeys.length ? '\n' + envKeys.map(k => k + '=' + t.env[k]).join('\n') : '');
+      main.addEventListener('click', () => spawnFromTemplate(idx));
+      const del = document.createElement('span');
+      del.className = 'del';
+      del.textContent = '✕';
+      del.addEventListener('click', e => { e.stopPropagation(); removeTemplate(idx); });
+      item.appendChild(document.createTextNode('▶'));
+      item.appendChild(main);
+      item.appendChild(del);
+      tl.appendChild(item);
+    });
+  }
 
   fl.innerHTML = favorites.length
     ? favorites.map(p =>

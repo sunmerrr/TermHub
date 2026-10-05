@@ -139,6 +139,46 @@ function getPresets() {
   return Array.isArray(saved) ? saved : DEFAULT_PRESETS;
 }
 
+// ── UI state (탭 순서·핀·마지막 활성 탭) — 어느 기기에서 열어도 같은 화면이 되도록 서버에 저장 ──
+function getUiState() {
+  const ui = loadState().ui || {};
+  return {
+    tabOrder: Array.isArray(ui.tabOrder) ? ui.tabOrder : [],
+    pinned: Array.isArray(ui.pinned) ? ui.pinned : [],
+    activeTab: typeof ui.activeTab === "string" ? ui.activeTab : null,
+  };
+}
+
+function updateUiState(partial) {
+  const state = loadState();
+  const ui = getUiState();
+  const idList = (v) => Array.isArray(v) ? [...new Set(v.map(String).filter((id) => /^\d+$/.test(id)))].slice(0, 200) : null;
+  if (idList(partial.tabOrder)) ui.tabOrder = idList(partial.tabOrder);
+  if (idList(partial.pinned)) ui.pinned = idList(partial.pinned);
+  if (partial.activeTab !== undefined) ui.activeTab = /^\d+$/.test(String(partial.activeTab)) ? String(partial.activeTab) : null;
+  state.ui = ui;
+  saveState(state);
+  return ui;
+}
+
+function forgetWorkerUiState(id) {
+  const ui = getUiState();
+  const sid = String(id);
+  if (!ui.tabOrder.includes(sid) && !ui.pinned.includes(sid) && ui.activeTab !== sid) return;
+  const state = loadState();
+  state.ui = {
+    tabOrder: ui.tabOrder.filter((t) => t !== sid),
+    pinned: ui.pinned.filter((t) => t !== sid),
+    activeTab: ui.activeTab === sid ? null : ui.activeTab,
+  };
+  saveState(state);
+}
+
+function sessionCreatedAt(sessionName) {
+  const sec = Number(tmux(`display-message -t ${sessionName} -p "#{session_created}"`).trim());
+  return sec > 0 ? sec * 1000 : Date.now();
+}
+
 function getBaseCommand(cmd) {
   if (!cmd) return "";
   return String(cmd).trim().split(/\s+/)[0] || "";
@@ -551,12 +591,41 @@ function startPolling(id) {
   w.pollTimer = setInterval(() => pollOutput(id), 1000);
 }
 
-function spawnWorker(cwd, cmd) {
+const ENV_KEY_PATTERN = /^[A-Za-z_][A-Za-z0-9_]*$/;
+
+// 템플릿/스폰 요청의 env 객체를 검증해 {KEY: value} 로 정리. 잘못된 키는 버린다.
+function sanitizeEnv(env) {
+  const out = {};
+  if (!env || typeof env !== "object" || Array.isArray(env)) return out;
+  for (const [key, value] of Object.entries(env).slice(0, 20)) {
+    if (!ENV_KEY_PATTERN.test(key)) continue;
+    out[key] = String(value ?? "").slice(0, 1000);
+  }
+  return out;
+}
+
+function getTemplates() {
+  const saved = loadState().templates;
+  return Array.isArray(saved) ? saved : [];
+}
+
+function sanitizeTemplates(list) {
+  if (!Array.isArray(list)) return null;
+  return list.slice(0, 30).map((t) => ({
+    name: String(t?.name || "").trim().slice(0, 60),
+    cwd: String(t?.cwd || "").trim().slice(0, 500),
+    cmd: String(t?.cmd || "").trim().slice(0, 500),
+    env: sanitizeEnv(t?.env),
+  })).filter((t) => t.name && t.cwd);
+}
+
+function spawnWorker(cwd, cmd, env) {
   const config = loadConfig();
   cmd = cmd || config.defaultCommand || "claude";
   const id = String(nextId++);
   const sessionName = "term-" + id;
-  tmux(`new-session -d -s ${sessionName} -c "${cwd}" -e CLAUDECODE=`);
+  const envArgs = Object.entries(sanitizeEnv(env)).flatMap(([key, value]) => ["-e", `${key}=${value}`]);
+  tmuxExec(["new-session", "-d", "-s", sessionName, "-c", cwd, "-e", "CLAUDECODE=", ...envArgs]);
   tmux(`send-keys -t ${sessionName} ${JSON.stringify(cmd)} Enter`);
   setSessionTitle(sessionName, "");
   const logs = [];
@@ -572,14 +641,16 @@ function spawnWorker(cwd, cmd) {
     lastPaneCommand: null,
     lastAction: null,
     title: "",
+    startedAt: Date.now(),
   });
   startPolling(id);
-  broadcast({ type: "spawned", id, cwd, cmd, status: "running", sessionName, title: "" });
+  broadcast({ type: "spawned", id, cwd, cmd, status: "running", sessionName, title: "", startedAt: Date.now() });
   return id;
 }
 
 function detectWaiting(output) {
-  const lines = output.split("\n");
+  // 패널 하단의 빈 줄은 무시 — 키 큰 패널에서 프롬프트가 위쪽에 있어도 잡히도록
+  const lines = output.split("\n").filter((l) => l.trim() !== "");
   const recent = lines.slice(-10).join("\n");
   // Common permission/decision patterns across AI CLIs
   if (/Esc to cancel/.test(recent)) return true;
@@ -935,7 +1006,9 @@ function workerSummary(id, w) {
     title: w.title || getSessionTitle(w.sessionName),
     logs: w.logs,
     aiState: w.aiState || null,
-    exitReason: w.exitReason || null
+    exitReason: w.exitReason || null,
+    startedAt: w.startedAt || null,
+    lastOutputAt: w.lastChangeTime || null
   };
 }
 
@@ -1104,9 +1177,10 @@ const server = http.createServer(async (req, res) => {
       lastPaneCommand: null,
       lastAction: null,
       title: getSessionTitle(sessionName),
+      startedAt: sessionCreatedAt(sessionName),
     });
     startPolling(id);
-    broadcast({ type: "spawned", id, cwd, status: "running", sessionName, title: getSessionTitle(sessionName) });
+    broadcast({ type: "spawned", id, cwd, status: "running", sessionName, title: getSessionTitle(sessionName), startedAt: workers.get(id).startedAt });
     return json(res, 200, { id });
   }
 
@@ -1123,8 +1197,25 @@ const server = http.createServer(async (req, res) => {
     } catch (e) {
       return json(res, 400, { ok: false, error: "Invalid path: does not exist or not accessible." });
     }
-    const id = spawnWorker(resolvedCwd, body.cmd);
+    const id = spawnWorker(resolvedCwd, body.cmd, body.env);
     return json(res, 200, { ok: true, id });
+  }
+
+  if (method === "GET" && url === "/api/templates") {
+    if (ctx.kind !== "full") return json(res, 403, { error: "forbidden" });
+    return json(res, 200, { templates: getTemplates() });
+  }
+
+  if (method === "POST" && url === "/api/templates") {
+    if (ctx.kind !== "full") return json(res, 403, { error: "forbidden" });
+    const body = JSON.parse(await readBody(req));
+    const cleaned = sanitizeTemplates(body.templates);
+    if (!cleaned) return json(res, 400, { ok: false, error: "templates must be an array" });
+    const state = loadState();
+    state.templates = cleaned;
+    saveState(state);
+    broadcast({ type: "templates", templates: cleaned });
+    return json(res, 200, { ok: true, templates: cleaned });
   }
 
   if (method === "POST" && url === "/api/title") {
@@ -1153,6 +1244,7 @@ const server = http.createServer(async (req, res) => {
       cleanupPreviewPorts(id);
       if (!isAlive(w.sessionName)) setSessionTitle(w.sessionName, "");
       workerResizeOwners.delete(String(id));
+      forgetWorkerUiState(id);
       // 워커 관련 alert 쿨다운 키 정리 (issueAlertTime 무한 누적 방지)
       issueAlertTime.delete(`worker-waiting-${id}`);
       workers.delete(id);
@@ -1268,6 +1360,19 @@ const server = http.createServer(async (req, res) => {
     const { id } = JSON.parse(await readBody(req));
     killWorker(id, "Stopped from dashboard (Stop button).");
     return json(res, 200, { ok: true });
+  }
+
+  if (method === "GET" && url === "/api/ui-state") {
+    if (ctx.kind !== "full") return json(res, 403, { error: "forbidden" });
+    return json(res, 200, getUiState());
+  }
+
+  if (method === "POST" && url === "/api/ui-state") {
+    if (ctx.kind !== "full") return json(res, 403, { error: "forbidden" });
+    const body = JSON.parse(await readBody(req));
+    const ui = updateUiState(body || {});
+    broadcast({ type: "ui_state", ui });
+    return json(res, 200, { ok: true, ui });
   }
 
   if (method === "GET" && url === "/api/presets") {
@@ -1422,6 +1527,7 @@ function recoverSessions() {
       lastPaneCommand: null,
       lastAction: null,
       title: getSessionTitle(sessionName),
+      startedAt: sessionCreatedAt(sessionName),
     });
     startPolling(id);
     if (numId >= nextId) nextId = numId + 1;

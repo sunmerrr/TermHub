@@ -27,11 +27,11 @@ function renderTitle(id, cwd, cmd) {
   const tabCmd = cmd || (tab && tab.dataset.cmd) || 'claude';
   const tabTitle = customTitles[id] || (tab && tab.dataset.title) || '';
   const folder = tabCwd.replace(/\/$/, '').split('/').pop() || tabCwd;
-  let text = '';
+  let text = tab && tab.dataset.pinned === '1' ? '📌 ' : '';
   if (tabTitle) {
-    text = '#' + id + ' ' + tabTitle;
+    text += '#' + id + ' ' + tabTitle;
   } else {
-    text = '#' + id + ' ' + tabCmd + ' · ' + folder;
+    text += '#' + id + ' ' + tabCmd + ' · ' + folder;
   }
   ['tab-label-' + id, 'card-title-' + id].forEach(function(elId) {
     document.querySelectorAll('#' + elId).forEach(function(el) {
@@ -53,22 +53,25 @@ function isScopedMode() {
 
 function cardActionButtonsHtml(id, status) {
   if (isScopedMode()) return '';
-  return '<button class="share-btn" id="share-' + id + '" title="Scoped URL">Share</button>' +
+  return '<button class="pin-btn" id="pin-' + id + '" title="Pin tab">📌</button>' +
+    '<button class="share-btn" id="share-' + id + '" title="Scoped URL">Share</button>' +
     '<button class="diff-btn" id="diff-' + id + '" title="Git Diff">Diff</button>' +
     killBtnHtml(id, status);
 }
 
-function ensureCard(id, cwd, status, logs, cmd, reason, title, sessionName) {
+function ensureCard(id, cwd, status, logs, cmd, reason, title, sessionName, startedAt, lastOutputAt) {
   if (document.getElementById('card-' + id)) return;
 
   const cmdLabel = cmd || 'claude';
   if (title) customTitles[id] = title;
+  workerTimes[id] = { startedAt: startedAt || null, lastOutputAt: lastOutputAt || null };
   const card = document.createElement('div');
   card.className = 'card';
   card.id = 'card-' + id;
   card.innerHTML =
     '<div class="card-header">' +
       '<span class="card-title" id="card-title-' + id + '">#' + id + ' ' + cmdLabel + ' · ' + (cwd.replace(/\/$/, '').split('/').pop() || cwd) + '</span>' +
+      '<span class="card-meta" id="meta-' + id + '"></span>' +
       '<span class="badge' + (status === 'stopped' ? ' stopped' : '') + (status === 'completed' ? ' completed' : '') + '" id="badge-' + id + '">' + status + '</span>' +
       cardActionButtonsHtml(id, status) +
     '</div>' +
@@ -128,7 +131,8 @@ function ensureCard(id, cwd, status, logs, cmd, reason, title, sessionName) {
   tab.dataset.title = title || '';
   var folder = cwd.replace(/\/$/, '').split('/').pop() || cwd;
   tab.innerHTML = '<span class="tab-dot' + (status === 'stopped' ? ' stopped' : '') + (status === 'completed' ? ' completed' : '') + '" id="tab-dot-' + id + '"></span><span class="tab-label" id="tab-label-' + id + '">#' + id + ' ' + (cmd || 'claude') + ' · ' + folder + '</span>';
-  tab.addEventListener('click', () => selectTab(id));
+  tab.dataset.pinned = (typeof uiState !== 'undefined' && uiState.pinned.map(String).includes(String(id))) ? '1' : '';
+  tab.addEventListener('click', () => selectTab(id, true));
   tab.addEventListener('dblclick', e => {
     e.stopPropagation();
     const current = customTitles[id] || tab.dataset.title || cmdLabel;
@@ -149,7 +153,12 @@ function ensureCard(id, cwd, status, logs, cmd, reason, title, sessionName) {
   bindTabDrag(tab);
   document.getElementById('tab-bar').appendChild(tab);
 
-  selectTab(id);
+  // 처음 열린 탭이거나 내가 방금 스폰한 워커일 때만 활성화 — 다른 기기의 스폰이 화면을 바꾸지 않는다
+  if (!activeTab || pendingSpawnSelect) {
+    pendingSpawnSelect = false;
+    selectTab(id);
+  }
+  refreshTabPriority();
 
   bindCard(id, panel);
   bindCard(id, splitCard);
@@ -162,7 +171,12 @@ function ensureCard(id, cwd, status, logs, cmd, reason, title, sessionName) {
   }
 
   renderTitle(id, cwd, cmdLabel);
-  if (logs) logs.forEach(l => appendLog(id, l.src, l.text));
+  renderWorkerMeta(id);
+  if (logs) {
+    logs.forEach(l => appendLog(id, l.src, l.text));
+    // 다음 출력 변화 전에도 선택지 버튼을 띄울 수 있도록 초기 로그를 스냅샷으로 삼는다
+    lastSnapshotLines[id] = logs.map(l => l.text);
+  }
   if (reason) updateExitReason(id, reason);
   if (status === 'running') updateExitReason(id, null);
   setTimeout(sendResize, 100);
@@ -180,6 +194,9 @@ function bindCard(id, root) {
 
   const shareBtn = q('#share-' + id);
   if (shareBtn) shareBtn.addEventListener('click', () => shareWorkerUrl(id, shareBtn));
+
+  const pinBtn = q('#pin-' + id);
+  if (pinBtn) pinBtn.addEventListener('click', () => togglePin(id));
 
   if (killBtn) killBtn.addEventListener('click', () => killWorker(id));
   if (sendBtn) sendBtn.addEventListener('click', () => sendInput(id));
@@ -395,6 +412,43 @@ function updateJumpButton(box, hasNew) {
   }
 }
 
+// ── Worker Meta (경과 시간 · 마지막 출력) ──
+
+const workerTimes = {};
+
+function fmtDuration(ms) {
+  const m = Math.floor(ms / 60000);
+  if (m < 1) return '<1m';
+  if (m < 60) return m + 'm';
+  const h = Math.floor(m / 60);
+  if (h < 24) return h + 'h ' + (m % 60) + 'm';
+  const d = Math.floor(h / 24);
+  return d + 'd ' + (h % 24) + 'h';
+}
+
+function renderWorkerMeta(id) {
+  const t = workerTimes[id];
+  if (!t) return;
+  const now = Date.now();
+  const parts = [];
+  if (t.startedAt) parts.push('up ' + fmtDuration(now - t.startedAt));
+  if (t.lastOutputAt) parts.push(now - t.lastOutputAt < 60000 ? 'active now' : 'last ' + fmtDuration(now - t.lastOutputAt) + ' ago');
+  const text = parts.join(' · ');
+  document.querySelectorAll('#meta-' + id).forEach(el => {
+    el.textContent = text;
+    el.title = (t.startedAt ? 'Started ' + new Date(t.startedAt).toLocaleString() : '') +
+      (t.lastOutputAt ? '\nLast output ' + new Date(t.lastOutputAt).toLocaleString() : '');
+  });
+}
+
+function markWorkerOutput(id) {
+  if (!workerTimes[id]) workerTimes[id] = { startedAt: null, lastOutputAt: null };
+  workerTimes[id].lastOutputAt = Date.now();
+  renderWorkerMeta(id);
+}
+
+setInterval(() => Object.keys(workerTimes).forEach(renderWorkerMeta), 30000);
+
 // ── Logs ──
 
 function isNearBottom(box) {
@@ -495,7 +549,7 @@ const lastSnapshotLines = {};
 
 function parseChoices(lines) {
   // 화면 맨 아래 영역만 본다 — 스크롤백에 남은 옛 메뉴를 다시 띄우지 않기 위함
-  const tail = lines.slice(-14).map(l => l.replace(/\s+$/, '')).filter(l => l.trim() !== '');
+  const tail = lines.map(l => l.replace(/\s+$/, '')).filter(l => l !== '').slice(-14);
   if (!tail.length) return null;
 
   const options = [];
@@ -600,6 +654,7 @@ function updateAIState(id, state) {
 function removeWorker(id) {
   apiPost('/api/remove', { id });
   clearCustomTitle(id);
+  delete workerTimes[id];
   removePreviewTabs(id);
   if (typeof closeGitDiff === 'function') closeGitDiff(id);
 
@@ -713,17 +768,23 @@ function spawnSession() {
   var base = window._basePath || '/tmp';
   var cwd = raw ? (raw.startsWith('/') ? raw : base + '/' + raw) : base;
   const cmd = document.getElementById('cmd-input').value.trim();
-  apiPost('/api/spawn', { cwd, cmd })
+  spawnWorkerRequest({ cwd, cmd });
+}
+
+function spawnWorkerRequest(body) {
+  pendingSpawnSelect = true;
+  apiPost('/api/spawn', body)
     .then(r => r.json().catch(() => ({})).then(d => ({ ok: r.ok, status: r.status, d })))
     .then(({ ok, status, d }) => {
-      if (status === 401) return; // 로그인 화면이 이미 표시됨
+      if (status === 401) { pendingSpawnSelect = false; return; } // 로그인 화면이 이미 표시됨
       if (!ok || d.ok === false) {
+        pendingSpawnSelect = false;
         alert(d.error || 'Invalid path. Worker not created.');
         return;
       }
-      addRecent(cwd);
+      addRecent(body.cwd);
     })
-    .catch(() => { alert('Failed to create worker.'); });
+    .catch(() => { pendingSpawnSelect = false; alert('Failed to create worker.'); });
 }
 
 function scanSessions() {

@@ -107,6 +107,11 @@ DISCORD_WEBHOOK=https://discord.com/api/webhooks/your/webhook-url
 
 > **참고:** `trycloudflare.com` URL은 임시 주소입니다. 재시작할 때마다 바뀝니다.
 
+4. (선택) **푸시 알림** — 워커가 입력/승인 대기 상태가 되면 폰이나 데스크톱으로 푸시 알림을 보낼 수 있습니다. HTTPS(터널 URL)로 대시보드를 열고 헤더의 종(🔕) 버튼을 눌러 알림을 허용하세요. VAPID 키는 첫 실행 시 자동 생성되어 `.termhub-state.json`에 저장됩니다.
+
+   - iOS: 먼저 홈 화면에 추가(공유 → 홈 화면에 추가)해야 합니다. Safari는 설치된 웹앱에만 푸시를 전달합니다.
+   - 선택 `.env` 설정: `PUSH_CONTACT=mailto:you@example.com` (푸시 서비스에 전달되는 연락처), `PUSH_COOLDOWN_MS=60000` (워커당 최소 알림 간격).
+
 ### 옵션 B. ngrok
 
 1. 설치

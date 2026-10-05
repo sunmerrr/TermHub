@@ -46,11 +46,90 @@ function refreshTabPriority() {
   document.title = waiting ? '(' + waiting + ') TermHub' : 'TermHub';
 }
 
-function selectTab(id) {
+// ── Shared UI state (서버 저장: 탭 순서·핀·마지막 활성 탭) ──
+
+let uiState = { tabOrder: [], pinned: [], activeTab: null };
+let uiStateSaveTimer = null;
+let uiStatePending = {};
+// 이 클라이언트가 직접 스폰한 워커만 자동으로 활성 탭이 된다 (다른 기기의 스폰이 화면을 뺏지 않도록)
+let pendingSpawnSelect = false;
+
+function isWorkerTabId(id) {
+  return /^\d+$/.test(String(id));
+}
+
+function currentWorkerTabOrder() {
+  return Array.from(document.querySelectorAll('#tab-bar .tab'))
+    .map(t => t.dataset.id)
+    .filter(isWorkerTabId);
+}
+
+function saveUiState(partial) {
+  Object.assign(uiState, partial);
+  if (typeof isScopedMode === 'function' && isScopedMode()) return;
+  Object.assign(uiStatePending, partial);
+  clearTimeout(uiStateSaveTimer);
+  uiStateSaveTimer = setTimeout(() => {
+    const body = uiStatePending;
+    uiStatePending = {};
+    apiPost('/api/ui-state', body);
+  }, 300);
+}
+
+function applyUiState(ui, initial) {
+  uiState = Object.assign({ tabOrder: [], pinned: [], activeTab: null }, ui || {});
+  const bar = document.getElementById('tab-bar');
+  const pinned = new Set(uiState.pinned.map(String));
+  const tabs = Array.from(bar.querySelectorAll('.tab'));
+  tabs.forEach(tab => {
+    if (!isWorkerTabId(tab.dataset.id)) return;
+    tab.dataset.pinned = pinned.has(tab.dataset.id) ? '1' : '';
+    document.querySelectorAll('#pin-' + tab.dataset.id).forEach(btn => btn.classList.toggle('on', pinned.has(tab.dataset.id)));
+    renderTitle(tab.dataset.id);
+  });
+
+  // 저장된 순서 먼저, 목록에 없는 탭(새 워커·미리보기)은 현재 순서대로 뒤에
+  const byId = new Map(tabs.map(t => [t.dataset.id, t]));
+  const ordered = uiState.tabOrder.map(String).filter(id => byId.has(id)).map(id => byId.get(id));
+  const rest = tabs.filter(t => !ordered.includes(t));
+  const desired = ordered.concat(rest);
+  // 순서가 그대로면 DOM을 건드리지 않는다 (다른 기기의 activeTab 저장 브로드캐스트마다 깜빡이지 않도록)
+  if (desired.some((t, i) => t !== tabs[i])) desired.forEach(t => bar.appendChild(t));
+  refreshTabPriority();
+
+  if (initial) {
+    const saved = uiState.activeTab && byId.has(uiState.activeTab) ? uiState.activeTab : null;
+    const first = currentWorkerTabOrder()[0] || (tabs[0] && tabs[0].dataset.id);
+    if (saved || first) selectTab(saved || first);
+  }
+}
+
+function loadUiState() {
+  if (typeof isScopedMode === 'function' && isScopedMode()) {
+    if (!activeTab) {
+      const first = document.querySelector('#tab-bar .tab');
+      if (first) selectTab(first.dataset.id);
+    }
+    return Promise.resolve();
+  }
+  return apiGet('/api/ui-state')
+    .then(ui => applyUiState(ui && !ui.error ? ui : null, true))
+    .catch(() => applyUiState(null, true));
+}
+
+function togglePin(id) {
+  const set = new Set(uiState.pinned.map(String));
+  if (set.has(String(id))) set.delete(String(id)); else set.add(String(id));
+  saveUiState({ pinned: [...set] });
+  applyUiState(uiState, false);
+}
+
+function selectTab(id, fromUser) {
   activeTab = id;
   document.querySelectorAll('.tab').forEach(t => t.classList.toggle('active', t.dataset.id === id));
   document.querySelectorAll('.tab-panel').forEach(p => p.classList.toggle('active', p.dataset.id === id));
   setTimeout(sendResize, 0);
+  if (fromUser && isWorkerTabId(id)) saveUiState({ activeTab: String(id) });
 }
 
 function switchTab(delta) {
@@ -62,7 +141,7 @@ function switchTab(delta) {
   }
   const idx = tabs.findIndex(t => t.dataset.id === activeTab);
   const next = idx === -1 ? 0 : (idx + delta + tabs.length) % tabs.length;
-  selectTab(tabs[next].dataset.id);
+  selectTab(tabs[next].dataset.id, true);
 }
 
 function bindTabDrag(tab) {
@@ -123,5 +202,6 @@ if (tabBar) {
 
   tabBar.addEventListener('drop', () => {
     indicator.classList.remove('show');
+    saveUiState({ tabOrder: currentWorkerTabOrder() });
   });
 }

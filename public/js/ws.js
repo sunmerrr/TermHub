@@ -30,7 +30,8 @@ function initWS() {
 }
 
 function handleMsg(d) {
-  if (d.type === 'spawned') ensureCard(d.id, d.cwd, d.status, [], d.cmd, d.reason || null, d.title || '', d.sessionName || '');
+  if (d.type === 'spawned') ensureCard(d.id, d.cwd, d.status, [], d.cmd, d.reason || null, d.title || '', d.sessionName || '', d.startedAt || null, null);
+  if (d.type === 'ui_state') applyUiState(d.ui, false);
   if (d.type === 'log') appendLog(d.id, d.src, d.text);
   if (d.type === 'status') updateStatus(d.id, d.status, d.reason || null);
   if (d.type === 'title') updateTitle(d.id, d.title || '');
@@ -43,6 +44,7 @@ function handleMsg(d) {
   if (d.type === 'snapshot') {
     lastSnapshotLines[d.id] = d.lines;
     updateChoices(d.id);
+    markWorkerOutput(d.id);
     document.querySelectorAll('#logs-' + d.id).forEach(box => {
       var wasAtBottom = isNearBottom(box);
       box.innerHTML = '';
@@ -56,6 +58,10 @@ function handleMsg(d) {
       if (wasAtBottom) box.scrollTop = box.scrollHeight;
       else updateJumpButton(box, true);
     });
+  }
+  if (d.type === 'templates') {
+    templates = Array.isArray(d.templates) ? d.templates : [];
+    renderDropdown();
   }
   if (d.type === 'presets') {
     presets = Array.isArray(d.presets) ? d.presets : [];
@@ -143,7 +149,7 @@ function loadAll() {
         if (!activeIds.has(String(id))) clearCustomTitle(id);
       });
       list.forEach(w => {
-        ensureCard(w.id, w.cwd, w.status, w.logs, w.cmd, w.exitReason || null, w.title || '', w.sessionName || '');
+        ensureCard(w.id, w.cwd, w.status, w.logs, w.cmd, w.exitReason || null, w.title || '', w.sessionName || '', w.startedAt || null, w.lastOutputAt || null);
         if (w.aiState) updateAIState(w.id, w.aiState);
       });
     });

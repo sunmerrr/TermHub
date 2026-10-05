@@ -6,7 +6,7 @@ function enterApp() {
   if (scopedWorkerId()) applyScopedMode(scopedWorkerId());
   loadConfig();
   initWS();
-  loadAll().then(() => {
+  loadAll().then(() => loadUiState()).then(() => {
     // 푸시 알림 클릭 등으로 ?focus=ID 진입 시 해당 워커 탭을 연다
     const params = new URLSearchParams(location.search);
     const focus = params.get('focus');
@@ -19,6 +19,7 @@ function enterApp() {
   });
   setLayout(layout);
   loadPresets();
+  if (!scopedWorkerId()) loadTemplates();
   if (typeof initPush === 'function') initPush();
 }
 
@@ -74,6 +75,7 @@ document.getElementById('spawn-btn').addEventListener('click', () => {
 document.getElementById('scan-btn').addEventListener('click', scanSessions);
 document.getElementById('push-btn').addEventListener('click', togglePush);
 document.getElementById('add-fav-btn').addEventListener('click', addFavorite);
+document.getElementById('save-tpl-btn').addEventListener('click', saveCurrentAsTemplate);
 document.getElementById('layout-tab-btn').addEventListener('click', () => setLayout('tab'));
 document.getElementById('layout-split-btn').addEventListener('click', () => setLayout('split'));
 
