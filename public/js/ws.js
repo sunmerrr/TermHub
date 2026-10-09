@@ -59,6 +59,7 @@ function handleMsg(d) {
       else updateJumpButton(box, true);
     });
   }
+  if (d.type === 'paths') applyPaths(d);
   if (d.type === 'templates') {
     templates = Array.isArray(d.templates) ? d.templates : [];
     renderDropdown();
@@ -156,7 +157,7 @@ function loadAll() {
 }
 
 function loadConfig() {
-  apiGet('/api/config')
+  return apiGet('/api/config')
     .then(cfg => {
       if (!cfg) return;
       if (cfg.scopedWorkerId && typeof applyScopedMode === 'function') applyScopedMode(cfg.scopedWorkerId);

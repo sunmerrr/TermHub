@@ -408,6 +408,11 @@ function showPreviewPrompt(workerId, port, contentType) {
 
   toast.querySelector('.preview-prompt-open').addEventListener('click', function() {
     toast.remove();
+    // 사용자가 승인한 포트만 서버가 외부 터널을 연다
+    apiPost('/api/preview/open', { workerId: workerId, port: port })
+      .then(function(r) { return r.json().catch(function() { return {}; }); })
+      .then(function(d) { if (d && d.url) updatePreviewTunnel(port, d.url); })
+      .catch(function() {});
     ensurePreview(workerId, port);
   });
 

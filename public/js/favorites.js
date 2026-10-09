@@ -1,19 +1,56 @@
 // ── Favorites & Path Management ──
 
+// localStorage는 기기별 임시 캐시. 원본은 서버(.termhub-state.json) — 터널 URL이 바뀌어도 유지된다.
 let favorites = JSON.parse(localStorage.getItem('fav') || 'null') || [];
 let recents = JSON.parse(localStorage.getItem('recent') || '[]');
+let pathsSyncTimer = null;
+let pathsPending = {};
 
 function displayPath(p) {
   const base = window._basePath || '';
   return (base && p.startsWith(base)) ? '📂 ' + p.slice(base.length) : p;
 }
 
+function syncPaths(partial) {
+  if (typeof isScopedMode === 'function' && isScopedMode()) return;
+  Object.assign(pathsPending, partial);
+  clearTimeout(pathsSyncTimer);
+  pathsSyncTimer = setTimeout(() => {
+    const body = pathsPending;
+    pathsPending = {};
+    apiPost('/api/paths', body);
+  }, 300);
+}
+
 function saveFavs() {
   localStorage.setItem('fav', JSON.stringify(favorites));
+  syncPaths({ favorites });
 }
 
 function saveRecents() {
   localStorage.setItem('recent', JSON.stringify(recents));
+  syncPaths({ recents });
+}
+
+function loadPaths() {
+  if (typeof isScopedMode === 'function' && isScopedMode()) return Promise.resolve();
+  return apiGet('/api/paths').then(d => {
+    if (!d || d.error) return;
+    if (d.favorites === null) {
+      // 서버에 저장된 적이 없으면 이 기기의 값(또는 config.json 시드)을 올린다
+      syncPaths({ favorites, recents });
+    } else {
+      applyPaths(d);
+    }
+  }).catch(() => {});
+}
+
+function applyPaths(d) {
+  if (Array.isArray(d.favorites)) favorites = d.favorites;
+  if (Array.isArray(d.recents)) recents = d.recents;
+  localStorage.setItem('fav', JSON.stringify(favorites));
+  localStorage.setItem('recent', JSON.stringify(recents));
+  renderDropdown();
 }
 
 function addRecent(p) {

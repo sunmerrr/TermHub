@@ -175,6 +175,28 @@ function forgetWorkerUiState(id) {
   saveState(state);
 }
 
+// 즐겨찾기·최근 경로 — localStorage는 터널 URL(origin)이 바뀌면 사라지므로 서버에 보관
+function getPaths() {
+  const state = loadState();
+  return {
+    favorites: Array.isArray(state.favorites) ? state.favorites : null,
+    recents: Array.isArray(state.recents) ? state.recents : [],
+  };
+}
+
+function updatePaths(partial) {
+  const state = loadState();
+  const clean = (v, max) => Array.isArray(v)
+    ? [...new Set(v.map((x) => String(x).trim().slice(0, 500)).filter(Boolean))].slice(0, max)
+    : null;
+  const favorites = clean(partial.favorites, 50);
+  const recents = clean(partial.recents, 10);
+  if (favorites) state.favorites = favorites;
+  if (recents) state.recents = recents;
+  saveState(state);
+  return getPaths();
+}
+
 function sessionCreatedAt(sessionName) {
   const sec = Number(tmux(`display-message -t ${sessionName} -p "#{session_created}"`).trim());
   return sec > 0 ? sec * 1000 : Date.now();
@@ -523,10 +545,11 @@ function detectPorts(id, output) {
       checkContentType(port).then((ct) => {
         if (ct === "html") {
           broadcast({ type: "preview_detected", workerId: id, port });
+          if (PREVIEW_TUNNEL) startPreviewTunnel(port);
         } else {
+          // HTML이 아니면 사용자가 "미리보기"를 눌렀을 때(/api/preview/open) 터널을 연다
           broadcast({ type: "preview_prompt", workerId: id, port, contentType: ct });
         }
-        if (PREVIEW_TUNNEL) startPreviewTunnel(port);
       });
     }).finally(() => portChecksInFlight.delete(flightKey));
   }
@@ -615,6 +638,27 @@ function sanitizeTemplates(list) {
   })).filter((t) => t.name && t.cwd);
 }
 
+// zsh는 초기화 중 입력 큐를 비우므로 프롬프트가 준비되기 전에 보낸 글자는 앞부분이 잘린다
+// ("claude" → "laude"). 화면이 그려진 것만으로는 부족하다(p10k instant prompt는 초기화 전에 먼저 그린다).
+// 빈 Enter를 보내 프롬프트 줄이 실제로 하나 늘어나는지(입력이 처리되는지) 확인한 뒤 명령을 보낸다.
+function promptLineCount(sessionName) {
+  return tmux(`capture-pane -t ${sessionName} -p`).split("\n").filter((l) => l.trim() !== "").length;
+}
+
+function sendCommandWhenShellReady(sessionName, cmd, attempt = 0) {
+  const before = promptLineCount(sessionName);
+  tmuxExec(["send-keys", "-t", sessionName, "Enter"]);
+  setTimeout(() => {
+    const accepted = before > 0 && promptLineCount(sessionName) > before;
+    if (accepted || attempt >= 25) {
+      tmuxExec(["send-keys", "-t", sessionName, "-l", "--", cmd]);
+      tmuxExec(["send-keys", "-t", sessionName, "Enter"]);
+      return;
+    }
+    sendCommandWhenShellReady(sessionName, cmd, attempt + 1);
+  }, 200);
+}
+
 function spawnWorker(cwd, cmd, env) {
   const config = loadConfig();
   cmd = cmd || config.defaultCommand || "claude";
@@ -622,7 +666,7 @@ function spawnWorker(cwd, cmd, env) {
   const sessionName = "term-" + id;
   const envArgs = Object.entries(sanitizeEnv(env)).flatMap(([key, value]) => ["-e", `${key}=${value}`]);
   tmuxExec(["new-session", "-d", "-s", sessionName, "-c", cwd, "-e", "CLAUDECODE=", ...envArgs]);
-  tmux(`send-keys -t ${sessionName} ${JSON.stringify(cmd)} Enter`);
+  sendCommandWhenShellReady(sessionName, cmd);
   setSessionTitle(sessionName, "");
   const logs = [];
   workers.set(id, {
@@ -1364,6 +1408,29 @@ const server = http.createServer(async (req, res) => {
     const { id } = JSON.parse(await readBody(req));
     killWorker(id, "Stopped from dashboard (Stop button).");
     return json(res, 200, { ok: true });
+  }
+
+  if (method === "POST" && url === "/api/preview/open") {
+    const { workerId, port } = JSON.parse(await readBody(req));
+    const numericPort = Number(port);
+    if (!canAccessWorker(ctx, workerId)) return json(res, 403, { ok: false, error: "forbidden" });
+    // 해당 워커에서 감지된 포트만 허용 — 임의 포트를 외부에 노출하지 않도록
+    if (!detectedPorts.get(String(workerId))?.has(numericPort)) return json(res, 404, { ok: false, error: "port not detected" });
+    if (PREVIEW_TUNNEL) startPreviewTunnel(numericPort);
+    return json(res, 200, { ok: true, url: previewTunnels.get(numericPort)?.url || null });
+  }
+
+  if (method === "GET" && url === "/api/paths") {
+    if (ctx.kind !== "full") return json(res, 403, { error: "forbidden" });
+    return json(res, 200, getPaths());
+  }
+
+  if (method === "POST" && url === "/api/paths") {
+    if (ctx.kind !== "full") return json(res, 403, { error: "forbidden" });
+    const body = JSON.parse(await readBody(req));
+    const paths = updatePaths(body || {});
+    broadcast({ type: "paths", ...paths });
+    return json(res, 200, { ok: true, ...paths });
   }
 
   if (method === "GET" && url === "/api/ui-state") {

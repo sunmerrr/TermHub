@@ -4,7 +4,7 @@ function enterApp() {
   document.getElementById('login').style.display = 'none';
   document.getElementById('app').style.display = 'flex';
   if (scopedWorkerId()) applyScopedMode(scopedWorkerId());
-  loadConfig();
+  loadConfig().then(loadPaths);
   initWS();
   loadAll().then(() => loadUiState()).then(() => {
     // 푸시 알림 클릭 등으로 ?focus=ID 진입 시 해당 워커 탭을 연다
