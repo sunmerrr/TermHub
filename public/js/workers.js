@@ -159,6 +159,7 @@ function ensureCard(id, cwd, status, logs, cmd, reason, title, sessionName, star
     selectTab(id);
   }
   refreshTabPriority();
+  sendView();
 
   bindCard(id, panel);
   bindCard(id, splitCard);
@@ -674,6 +675,7 @@ function removeWorker(id) {
   if (card) card.remove();
   updateSplitGrid();
   refreshTabPriority();
+  sendView();
 }
 
 function updateCwd(id, cwd) {

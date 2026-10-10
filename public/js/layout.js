@@ -13,6 +13,7 @@ function setLayout(mode) {
   document.getElementById('layout-split-btn').classList.toggle('layout-active', mode === 'split');
   updateSplitGrid();
   setTimeout(sendResize, 50);
+  if (typeof sendView === 'function') sendView();
 }
 
 function updateSplitGrid() {
@@ -129,6 +130,7 @@ function selectTab(id, fromUser) {
   document.querySelectorAll('.tab').forEach(t => t.classList.toggle('active', t.dataset.id === id));
   document.querySelectorAll('.tab-panel').forEach(p => p.classList.toggle('active', p.dataset.id === id));
   setTimeout(sendResize, 0);
+  if (typeof sendView === 'function') sendView();
   if (fromUser && isWorkerTabId(id)) saveUiState({ activeTab: String(id) });
 }
 

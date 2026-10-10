@@ -846,8 +846,14 @@ function pollOutput(id) {
   }
   const cols = w.cols || 80;
   const rows = terminalRowsForWorker(w);
-  tmux(`resize-pane -t ${w.sessionName} -x ${cols} -y ${rows}`);
-  tmux(`resize-window -t ${w.sessionName} -x ${cols} -y ${rows}`);
+  // 매초 2개의 resize 프로세스를 띄우지 않도록 크기가 바뀌었을 때만 적용 (외부 attach 대비 30초마다 재적용)
+  const sizeKey = `${cols}x${rows}`;
+  if (w.appliedSize !== sizeKey || Date.now() - (w.appliedSizeAt || 0) > 30000) {
+    tmux(`resize-pane -t ${w.sessionName} -x ${cols} -y ${rows}`);
+    tmux(`resize-window -t ${w.sessionName} -x ${cols} -y ${rows}`);
+    w.appliedSize = sizeKey;
+    w.appliedSizeAt = Date.now();
+  }
   const output = displayOutputForWorker(w, tmux(`capture-pane -t ${w.sessionName} -p -S -500 -J`));
 
   // Track actual working directory
@@ -896,7 +902,7 @@ function pollOutput(id) {
   w.lastChangeTime = Date.now();
   const lines = output.split("\n");
   w.logs = lines.slice(-200).map(text => ({ src: "stdout", text, ts: Date.now() }));
-  broadcast({ type: "snapshot", id, lines });
+  broadcastSnapshot(id, lines);
 
   // Output just changed — check for waiting, otherwise working
   const waiting = detectWaiting(output);
@@ -957,6 +963,27 @@ function broadcast(obj) {
   wss.clients.forEach(c => {
     if (c.readyState === 1 && canReceiveMessage(c.authContext, obj)) c.send(msg);
   });
+}
+
+// 스냅샷(최대 500줄)은 그 워커를 보고 있는 클라이언트에게만 보낸다 — 모바일 데이터·배터리 절약.
+// 'view' 메시지를 보낸 적 없는(구버전) 클라이언트는 전부 받는다.
+function broadcastSnapshot(id, lines) {
+  if (!wss) return;
+  const obj = { type: "snapshot", id, lines };
+  let msg = null;
+  wss.clients.forEach(c => {
+    if (c.readyState !== 1 || !canReceiveMessage(c.authContext, obj)) return;
+    if (c.viewing && !c.viewing.has(String(id))) return;
+    if (!msg) msg = JSON.stringify(obj);
+    c.send(msg);
+  });
+}
+
+function sendCurrentSnapshot(ws, id) {
+  const w = workers.get(String(id));
+  if (!w) return;
+  const lines = lastCapture[String(id)] !== undefined ? lastCapture[String(id)].split("\n") : w.logs.map(l => l.text);
+  ws.send(JSON.stringify({ type: "snapshot", id: String(id), lines }));
 }
 
 function readBody(req) {
@@ -1502,8 +1529,17 @@ const server = http.createServer(async (req, res) => {
   json(res, 404, { error: "not found" });
 });
 
-wss = new WebSocketServer({ server });
+wss = new WebSocketServer({ server, perMessageDeflate: { threshold: 1024 } });
 const clientSizes = new Map();
+const WS_PING_INTERVAL_MS = 30000;
+// 끊긴 소켓(절전 모드의 폰 등)을 정리 — pong이 없으면 다음 주기에 종료해 클라이언트가 재연결하게 한다
+setInterval(() => {
+  wss.clients.forEach(c => {
+    if (c.isAliveSocket === false) { c.terminate(); return; }
+    c.isAliveSocket = false;
+    c.ping();
+  });
+}, WS_PING_INTERVAL_MS);
 wss.on('connection', (ws, req) => {
   const ctx = authContext(req);
   if (!ctx) {
@@ -1511,6 +1547,8 @@ wss.on('connection', (ws, req) => {
     return;
   }
   ws.authContext = ctx;
+  ws.isAliveSocket = true;
+  ws.on('pong', () => { ws.isAliveSocket = true; });
   if (ctx.kind === "worker") {
     workerResizeOwners.set(String(ctx.workerId), ws);
   }
@@ -1518,6 +1556,14 @@ wss.on('connection', (ws, req) => {
   ws.on('message', raw => {
     try {
       const msg = JSON.parse(raw);
+      if (msg.type === 'view') {
+        const ids = Array.isArray(msg.ids) ? msg.ids.map(String).filter(id => canAccessWorker(ctx, id)) : [];
+        const previous = ws.viewing || new Set();
+        ws.viewing = new Set(ids);
+        // 새로 보기 시작한 워커는 현재 화면을 바로 보내준다
+        ids.forEach(id => { if (!previous.has(id)) sendCurrentSnapshot(ws, id); });
+        return;
+      }
       if (msg.type === 'resize') {
         const size = { cols: msg.cols, rows: msg.rows };
         clientSizes.set(ws, size);

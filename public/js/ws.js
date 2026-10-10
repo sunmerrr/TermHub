@@ -21,12 +21,43 @@ function initWS() {
   ws.onopen = () => {
     document.getElementById('status-dot').classList.remove('off');
     sendResize();
+    sendView(true);
   };
   ws.onclose = () => {
     document.getElementById('status-dot').classList.add('off');
-    setTimeout(initWS, 2000);
+    scheduleReconnect(2000);
   };
   ws.onmessage = e => handleMsg(JSON.parse(e.data));
+}
+
+let reconnectTimer = null;
+function scheduleReconnect(delay) {
+  clearTimeout(reconnectTimer);
+  reconnectTimer = setTimeout(() => {
+    reconnectTimer = null;
+    if (!ws || ws.readyState === WebSocket.CLOSED) initWS();
+  }, delay);
+}
+
+// 폰을 잠갔다 켜면 소켓이 죽어 있는 경우가 많다 — 화면이 돌아오면 바로 재연결
+document.addEventListener('visibilitychange', () => {
+  if (document.visibilityState !== 'visible' || !ws) return;
+  if (ws.readyState === WebSocket.CLOSED || ws.readyState === WebSocket.CLOSING) scheduleReconnect(0);
+});
+
+// 서버에 "지금 보고 있는 워커"를 알린다 — 스냅샷은 보고 있는 워커 것만 받는다
+let lastViewKey = null;
+function sendView(force) {
+  if (!ws || ws.readyState !== 1) return;
+  let ids;
+  const scoped = scopedWorkerId();
+  if (scoped) ids = [String(scoped)];
+  else if (typeof layout !== 'undefined' && layout === 'split') ids = Array.from(document.querySelectorAll('#tab-bar .tab')).map(t => t.dataset.id).filter(id => /^\d+$/.test(id));
+  else ids = activeTab && /^\d+$/.test(String(activeTab)) ? [String(activeTab)] : [];
+  const key = ids.join(',');
+  if (!force && key === lastViewKey) return;
+  lastViewKey = key;
+  ws.send(JSON.stringify({ type: 'view', ids }));
 }
 
 function handleMsg(d) {
@@ -47,14 +78,19 @@ function handleMsg(d) {
     markWorkerOutput(d.id);
     document.querySelectorAll('#logs-' + d.id).forEach(box => {
       var wasAtBottom = isNearBottom(box);
-      box.innerHTML = '';
-      d.lines.forEach(text => {
+      // 500개 노드를 매번 새로 만들지 않고 바뀐 줄만 갱신한다
+      const existing = box.children;
+      d.lines.forEach((text, i) => {
+        if (i < existing.length) {
+          if (existing[i].textContent !== text) existing[i].textContent = text;
+          return;
+        }
         const line = document.createElement('div');
         line.className = 'log-line stdout';
-        markPrompt(line, text);
         line.textContent = text;
         box.appendChild(line);
       });
+      while (box.children.length > d.lines.length) box.removeChild(box.lastChild);
       if (wasAtBottom) box.scrollTop = box.scrollHeight;
       else updateJumpButton(box, true);
     });
