@@ -2,7 +2,7 @@ require("dotenv").config();
 const http = require("http");
 const net = require("net");
 const crypto = require("crypto");
-const { execSync, execFileSync, spawn } = require("child_process");
+const { execSync, execFileSync, execFile, spawn } = require("child_process");
 const fs = require("fs");
 const path = require("path");
 const { WebSocketServer } = require("ws");
@@ -63,6 +63,7 @@ let tunnelProcess = null;
 let tunnelHealthFailures = 0;
 let cachedTunnelUrl = null;
 const ACTION_WINDOW_MS = 7000;
+const INPUT_ENTER_DELAY_MS = Number(process.env.INPUT_ENTER_DELAY_MS || 150);
 const SHELL_COMMANDS = new Set(["bash", "zsh", "sh", "fish"]);
 const issueAlertTime = new Map(); // key: alert key, value: timestamp
 const ISSUE_ALERT_COOLDOWN_MS = 120000; // 120s cooldown per issue key
@@ -304,35 +305,27 @@ function rememberIgnoredPreviewPort(port) {
   ignoredPreviewPorts.set(port, Date.now());
 }
 
-function getCommandLine(pid) {
-  try {
-    return execFileSync("ps", ["-p", String(pid), "-o", "command="], {
-      encoding: "utf8",
-      stdio: "pipe",
-    }).trim();
-  } catch (e) {
-    return "";
-  }
+// lsof/ps는 macOS에서 1초 이상 걸릴 수 있어 동기 호출 시 이벤트 루프가 멈춘다 → 반드시 비동기로
+function execFileAsync(cmd, args) {
+  return new Promise((resolve) => {
+    execFile(cmd, args, { encoding: "utf8", maxBuffer: 1024 * 1024 }, (err, stdout) => resolve(err ? "" : stdout));
+  });
 }
 
-function isIgnoredPreviewPortOwner(port) {
-  let raw = "";
-  try {
-    raw = execFileSync("lsof", ["-nP", `-iTCP:${port}`, "-sTCP:LISTEN", "-Fpc"], {
-      encoding: "utf8",
-      maxBuffer: 256 * 1024,
-      stdio: "pipe",
-    });
-  } catch (e) {
-    return false;
-  }
+async function getCommandLine(pid) {
+  return (await execFileAsync("ps", ["-p", String(pid), "-o", "command="])).trim();
+}
+
+async function isIgnoredPreviewPortOwner(port) {
+  const raw = await execFileAsync("lsof", ["-nP", `-iTCP:${port}`, "-sTCP:LISTEN", "-Fpc"]);
+  if (!raw) return false;
 
   let current = { pid: null, command: "" };
   for (const line of raw.split("\n")) {
     if (!line) continue;
     if (line[0] === "p") {
       current = { pid: line.slice(1), command: "" };
-      if (PREVIEW_IGNORE_PROCESS_PATTERN.test(getCommandLine(current.pid))) {
+      if (PREVIEW_IGNORE_PROCESS_PATTERN.test(await getCommandLine(current.pid))) {
         return true;
       }
       continue;
@@ -468,14 +461,13 @@ function extractPortsFromOutput(output) {
 const pendingPorts = new Map(); // id → Set<port>
 const previewHealthFailures = new Map(); // "workerId:port" → consecutive failure count
 
-function isCloudflaredPort(port) {
-  try {
-    const out = execSync(`lsof -nP -iTCP:${port} -sTCP:LISTEN`, { encoding: "utf8", stdio: "pipe" });
-    return /\bcloudflar(?:ed)?\b/i.test(out);
-  } catch (e) {
-    return false;
-  }
+async function isCloudflaredPort(port) {
+  const out = await execFileAsync("lsof", ["-nP", `-iTCP:${port}`, "-sTCP:LISTEN"]);
+  return /\bcloudflar(?:ed)?\b/i.test(out);
 }
+
+// 비동기 검사 중인 포트 — 다음 폴링에서 같은 포트를 중복 처리하지 않도록
+const portChecksInFlight = new Set();
 
 function portCameFromIgnoredLine(output, index) {
   const lineStart = output.lastIndexOf("\n", index) + 1;
@@ -504,17 +496,21 @@ function detectPorts(id, output) {
   // pending 포트들의 리스닝 여부 확인
   for (const port of [...pending]) {
     pending.delete(port);
-    checkPortListening(port).then((listening) => {
+    const flightKey = `${id}:${port}`;
+    if (portChecksInFlight.has(flightKey)) continue;
+    portChecksInFlight.add(flightKey);
+    checkPortListening(port).then(async (listening) => {
       if (!listening) {
         pending.add(port);
         return;
       }
       if (portSet.has(port)) return;
-      if (isCloudflaredPort(port)) return;
-      if (!isExplicitlyAllowedPreviewPort(port) && isIgnoredPreviewPortOwner(port)) {
+      if (await isCloudflaredPort(port)) return;
+      if (!isExplicitlyAllowedPreviewPort(port) && await isIgnoredPreviewPortOwner(port)) {
         rememberIgnoredPreviewPort(port);
         return;
       }
+      if (portSet.has(port)) return;
       portSet.add(port);
       previewHealthFailures.delete(`${id}:${port}`);
 
@@ -532,7 +528,7 @@ function detectPorts(id, output) {
         }
         if (PREVIEW_TUNNEL) startPreviewTunnel(port);
       });
-    });
+    }).finally(() => portChecksInFlight.delete(flightKey));
   }
 }
 
@@ -878,10 +874,18 @@ function sendInput(id, text) {
     startPolling(id);
     broadcast({ type: "status", id, status: "running", reason: null });
   }
+  // 텍스트와 Enter를 붙여 보내면 바쁜 TUI(Claude Code)가 한 덩어리의 붙여넣기로 읽어
+  // Enter를 줄바꿈으로 삼키는 경우가 있다 → 줄마다 잠깐 간격을 두고 Enter를 보낸다
   const lines = text.split("\n");
+  const sessionName = w.sessionName;
+  let delay = 0;
   for (const line of lines) {
-    if (line) tmuxExec(["send-keys", "-t", w.sessionName, "-l", "--", line]);
-    tmuxExec(["send-keys", "-t", w.sessionName, "Enter"]);
+    if (line) {
+      setTimeout(() => tmuxExec(["send-keys", "-t", sessionName, "-l", "--", line]), delay);
+      delay += INPUT_ENTER_DELAY_MS;
+    }
+    setTimeout(() => tmuxExec(["send-keys", "-t", sessionName, "Enter"]), delay);
+    delay += INPUT_ENTER_DELAY_MS;
   }
   rememberAction(w, "input", "text");
   broadcast({ type: "log", id, src: "stdin", text, ts: Date.now() });

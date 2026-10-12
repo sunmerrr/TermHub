@@ -116,6 +116,11 @@ document.addEventListener('keydown', e => {
     if (hasSelection) return;
     e.preventDefault();
     sendSpecialKey(activeTab, 'C-c');
+  } else if (e.ctrlKey && !e.metaKey && !e.altKey && /^[a-z]$/i.test(e.key)) {
+    // 나머지 Ctrl+문자 조합(⌃x 등)도 터미널로 전달. 입력창 안에서는 비어 있을 때만, 붙여넣기(⌃v)는 보호
+    if (inInput && (e.target.value || e.key.toLowerCase() === 'v')) return;
+    e.preventDefault();
+    sendSpecialKey(activeTab, 'C-' + e.key.toLowerCase());
   } else if (e.key === 'Enter' && !e.target.closest('.input-row') && !e.target.closest('.toolbar') && !e.target.closest('#login')) {
     e.preventDefault();
     sendSpecialKey(activeTab, 'Enter');
