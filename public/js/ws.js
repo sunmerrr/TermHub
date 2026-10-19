@@ -20,7 +20,7 @@ function initWS() {
   ws = new WebSocket(proto + '://' + location.host + scopedQuery);
   ws.onopen = () => {
     document.getElementById('status-dot').classList.remove('off');
-    sendResize();
+    sendResize(true);
     sendView(true);
   };
   ws.onclose = () => {
@@ -106,8 +106,8 @@ function handleMsg(d) {
   }
 }
 
-function notifyActive() {
-  if (ws && ws.readyState === 1) ws.send(JSON.stringify({ type: 'active' }));
+function notifyActive(id) {
+  if (ws && ws.readyState === 1) ws.send(JSON.stringify({ type: 'active', id: id !== undefined ? String(id) : undefined }));
 }
 
 // ── Terminal Resize ──
@@ -124,7 +124,10 @@ function measureChar(box) {
   return { w: rect.width, h: rect.height };
 }
 
-function sendResize() {
+// 워커별 마지막 전송 크기 — 같은 크기면 다시 보내지 않는다 (resize마다 TUI가 전체를 다시 그려 중복이 쌓인다)
+const lastSentSizes = {};
+
+function sendResize(force) {
   if (!ws || ws.readyState !== 1) return;
   const MIN_COLS = 8;
   const MIN_ROWS = 4;
@@ -140,8 +143,13 @@ function sendResize() {
   const innerH = Math.max(0, box.clientHeight - padY);
   const cols = Math.max(MIN_COLS, Math.floor(innerW / ch.w));
   const rows = Math.max(MIN_ROWS, Math.floor(innerH / ch.h));
+  const key = cols + 'x' + rows;
   document.querySelectorAll('.tab').forEach(t => {
-    ws.send(JSON.stringify({ type: 'resize', id: t.dataset.id, cols, rows }));
+    const id = t.dataset.id;
+    if (!/^\d+$/.test(id)) return; // 미리보기 탭은 워커가 아니다
+    if (force !== true && lastSentSizes[id] === key) return;
+    lastSentSizes[id] = key;
+    ws.send(JSON.stringify({ type: 'resize', id, cols, rows }));
   });
 }
 

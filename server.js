@@ -1125,18 +1125,27 @@ function canAccessWorker(ctx, workerId) {
   return String(ctx.workerId) === String(workerId);
 }
 
+// 워커 크기의 주인은 하나의 소켓이다. 주인이 없으면 처음 크기를 보낸 소켓이 주인이 되고,
+// 'active'(입력)로만 주인이 바뀐다. 여러 기기가 서로 크기를 덮어써서 TUI가 계속 다시 그리는 것을 막는다.
 function setWorkerSize(workerId, size, owner) {
   const w = workers.get(String(workerId));
   if (!w) return;
   const currentOwner = workerResizeOwners.get(String(workerId));
   if (currentOwner && currentOwner !== owner) return;
+  if (!currentOwner) workerResizeOwners.set(String(workerId), owner);
   w.cols = size.cols;
   w.rows = size.rows;
 }
 
+function claimWorkerSize(workerId, size, owner) {
+  workerResizeOwners.set(String(workerId), owner);
+  if (size) setWorkerSize(workerId, size, owner);
+}
+
 function setAllUnownedWorkerSizes(size, owner) {
   workers.forEach((_, workerId) => {
-    if (workerResizeOwners.has(workerId)) return;
+    const currentOwner = workerResizeOwners.get(workerId);
+    if (currentOwner && currentOwner !== owner) return;
     setWorkerSize(workerId, size, owner);
   });
 }
@@ -1577,7 +1586,10 @@ wss.on('connection', (ws, req) => {
       }
       if (msg.type === 'active') {
         const size = clientSizes.get(ws);
-        if (size && ctx.kind === "full") {
+        if (msg.id && workers.has(String(msg.id)) && canAccessWorker(ctx, msg.id)) {
+          // 입력한 기기가 그 워커 크기의 주인이 된다
+          claimWorkerSize(msg.id, size, ws);
+        } else if (size && ctx.kind === "full") {
           setAllUnownedWorkerSizes(size, ws);
         } else if (size) {
           setWorkerSize(ctx.workerId, size, ws);

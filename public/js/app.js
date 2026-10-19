@@ -84,7 +84,7 @@ document.addEventListener('click', e => {
   if (!e.target.closest('.toolkit-wrap')) closeToolkitPopups();
 });
 
-window.addEventListener('resize', sendResize);
+window.addEventListener('resize', () => sendResize());
 
 // ── Keyboard Shortcuts ──
 

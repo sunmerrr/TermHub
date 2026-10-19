@@ -325,7 +325,7 @@ function renderPresets() {
           return;
         }
         closeToolkitPopups();
-        notifyActive();
+        notifyActive(id);
         apiPost('/api/input', { id, text });
       });
       list.appendChild(chip);
@@ -656,6 +656,7 @@ function removeWorker(id) {
   apiPost('/api/remove', { id });
   clearCustomTitle(id);
   delete workerTimes[id];
+  delete lastSentSizes[id];
   removePreviewTabs(id);
   if (typeof closeGitDiff === 'function') closeGitDiff(id);
 
@@ -739,12 +740,12 @@ function shareWorkerUrl(id, btn) {
 // ── Worker Actions ──
 
 function sendSpecialKey(id, key) {
-  notifyActive();
+  notifyActive(id);
   apiPost('/api/key', { id, key });
 }
 
 function sendKeys(id, keys) {
-  notifyActive();
+  notifyActive(id);
   apiPost('/api/key', { id, keys });
 }
 
@@ -756,7 +757,7 @@ function sendInput(id) {
   text = text.split('\n').filter(l => l.trim() !== '').join('\n');
   if (!text) return;
   inps.forEach(inp => { inp.value = ''; inp.style.height = 'auto'; });
-  notifyActive();
+  notifyActive(id);
   apiPost('/api/input', { id, text });
 }
 
