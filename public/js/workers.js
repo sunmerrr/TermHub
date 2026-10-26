@@ -26,10 +26,14 @@ function renderTitle(id, cwd, cmd) {
   const tabCwd = cwd || (tab && tab.dataset.cwd) || '';
   const tabCmd = cmd || (tab && tab.dataset.cmd) || 'claude';
   const tabTitle = customTitles[id] || (tab && tab.dataset.title) || '';
+  // 직접 지은 제목이 없으면 Claude 세션 간 메시징 이름(pokerdiary-7f)을 쓴다 — 세션끼리 부를 때 쓰는 이름과 탭이 일치한다
+  const claudeName = (tab && tab.dataset.claudeName) || '';
   const folder = tabCwd.replace(/\/$/, '').split('/').pop() || tabCwd;
   let text = tab && tab.dataset.pinned === '1' ? '📌 ' : '';
   if (tabTitle) {
     text += '#' + id + ' ' + tabTitle;
+  } else if (claudeName) {
+    text += '#' + id + ' ' + claudeName;
   } else {
     text += '#' + id + ' ' + tabCmd + ' · ' + folder;
   }
@@ -59,7 +63,7 @@ function cardActionButtonsHtml(id, status) {
     killBtnHtml(id, status);
 }
 
-function ensureCard(id, cwd, status, logs, cmd, reason, title, sessionName, startedAt, lastOutputAt) {
+function ensureCard(id, cwd, status, logs, cmd, reason, title, sessionName, startedAt, lastOutputAt, claudeName) {
   if (document.getElementById('card-' + id)) return;
 
   const cmdLabel = cmd || 'claude';
@@ -129,6 +133,7 @@ function ensureCard(id, cwd, status, logs, cmd, reason, title, sessionName, star
   tab.dataset.cmd = cmdLabel;
   tab.dataset.sessionName = sessionName || '';
   tab.dataset.title = title || '';
+  tab.dataset.claudeName = claudeName || '';
   var folder = cwd.replace(/\/$/, '').split('/').pop() || cwd;
   tab.innerHTML = '<span class="tab-dot' + (status === 'stopped' ? ' stopped' : '') + (status === 'completed' ? ' completed' : '') + '" id="tab-dot-' + id + '"></span><span class="tab-label" id="tab-label-' + id + '">#' + id + ' ' + (cmd || 'claude') + ' · ' + folder + '</span>';
   tab.dataset.pinned = (typeof uiState !== 'undefined' && uiState.pinned.map(String).includes(String(id))) ? '1' : '';
@@ -654,6 +659,10 @@ function updateAIState(id, state) {
 
 function removeWorker(id) {
   apiPost('/api/remove', { id });
+  removeWorkerDom(id);
+}
+
+function removeWorkerDom(id) {
   clearCustomTitle(id);
   delete workerTimes[id];
   delete lastSentSizes[id];
@@ -690,6 +699,13 @@ function updateCwd(id, cwd) {
   const tab = document.querySelector('.tab[data-id="' + id + '"]');
   if (tab) tab.dataset.cwd = cwd;
   renderTitle(id, cwd);
+}
+
+function updateClaudeName(id, claudeName) {
+  const tab = document.querySelector('.tab[data-id="' + id + '"]');
+  if (!tab) return;
+  tab.dataset.claudeName = claudeName || '';
+  renderTitle(id);
 }
 
 function updateTitle(id, title) {

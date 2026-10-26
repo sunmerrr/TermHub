@@ -4,6 +4,7 @@ const net = require("net");
 const crypto = require("crypto");
 const { execSync, execFileSync, execFile, spawn } = require("child_process");
 const fs = require("fs");
+const os = require("os");
 const path = require("path");
 const { WebSocketServer } = require("ws");
 
@@ -26,6 +27,9 @@ const PREVIEW_HEALTH_INTERVAL_MS = Math.max(
 const PREVIEW_CLOSE_FAILURES = Math.max(1, Number(process.env.PREVIEW_CLOSE_FAILURES || 1));
 const CLAUDE_MIN_ROWS = Math.max(50, Number(process.env.CLAUDE_MIN_ROWS || 500));
 const STATE_PATH = path.join(__dirname, ".termhub-state.json");
+// Claude Code가 실행 중인 세션마다 남기는 레지스트리 (<pid>.json: sessionId, tmux 위치, 세션 간 메시징 이름)
+const CLAUDE_SESSIONS_DIR = path.join(os.homedir(), ".claude", "sessions");
+const CLAUDE_SESSION_SYNC_MS = 5000;
 const ENABLE_PREVIEW_PORT_SCAN = process.env.ENABLE_PREVIEW_PORT_SCAN === "1";
 
 // workerId(문자열) → Set<number> : 워커별 감지된 포트 목록
@@ -133,6 +137,97 @@ function setSessionTitle(sessionName, title) {
   return trimmed;
 }
 
+// ── 워커 영속화 — 재부팅으로 tmux가 통째로 사라져도 어떤 폴더에서 어떤 Claude 세션이 돌고 있었는지 남긴다 ──
+function persistWorker(id) {
+  const w = workers.get(String(id));
+  if (!w) return;
+  const state = loadState();
+  state.workers = state.workers || {};
+  state.workers[String(id)] = {
+    sessionName: w.sessionName,
+    cwd: w.cwd,
+    cmd: w.cmd || "",
+    env: w.env || {},
+    claudeSessionId: w.claudeSessionId || null,
+    claudeName: w.claudeName || null,
+    status: w.status,
+    startedAt: w.startedAt || null,
+  };
+  saveState(state);
+}
+
+function forgetPersistedWorker(id) {
+  const state = loadState();
+  if (!state.workers || !state.workers[String(id)]) return;
+  delete state.workers[String(id)];
+  saveState(state);
+}
+
+// tmux 세션 이름("term-3") → 그 안에서 살아 있는 Claude 세션 정보. 레지스트리의 tmux 필드("term-3:@2.%2")로 짝을 맞춘다.
+function readClaudeSessionRegistry() {
+  const byTmuxSession = new Map();
+  let files = [];
+  try { files = fs.readdirSync(CLAUDE_SESSIONS_DIR); } catch { return byTmuxSession; }
+  for (const file of files) {
+    if (!file.endsWith(".json")) continue;
+    let info;
+    try { info = JSON.parse(fs.readFileSync(path.join(CLAUDE_SESSIONS_DIR, file), "utf8")); } catch { continue; }
+    if (!info || !info.sessionId || typeof info.tmux !== "string") continue;
+    // 비정상 종료 후 남은 파일은 pid가 죽어 있다
+    try { process.kill(info.pid, 0); } catch { continue; }
+    const tmuxSession = info.tmux.split(":")[0];
+    const prev = byTmuxSession.get(tmuxSession);
+    if (!prev || (info.startedAt || 0) > prev.startedAt) {
+      byTmuxSession.set(tmuxSession, { sessionId: info.sessionId, name: info.name || null, startedAt: info.startedAt || 0 });
+    }
+  }
+  return byTmuxSession;
+}
+
+function syncClaudeSessions() {
+  const registry = readClaudeSessionRegistry();
+  for (const [id, w] of workers) {
+    if (w.status !== "running") continue;
+    const found = registry.get(w.sessionName);
+    if (!found) continue;
+    // 재부팅 전 파일의 pid가 다른 프로세스에 재사용됐을 수 있다 — 워커(tmux 세션)보다 먼저 시작된 기록은 믿지 않는다
+    if (found.startedAt && w.startedAt && found.startedAt < w.startedAt - 60000) continue;
+    if (found.sessionId === w.claudeSessionId && found.name === w.claudeName) continue;
+    w.claudeSessionId = found.sessionId;
+    w.claudeName = found.name;
+    persistWorker(id);
+    broadcast({ type: "claude", id, claudeSessionId: w.claudeSessionId, claudeName: w.claudeName });
+  }
+}
+
+// Claude는 첫 메시지를 보내기 전까지 대화 기록(jsonl)을 만들지 않는다 — 기록이 없는 세션을 --resume 하면 에러만 남기고 셸로 떨어진다
+function claudeTranscriptExists(sessionId) {
+  const projectsDir = path.join(os.homedir(), ".claude", "projects");
+  let dirs = [];
+  try { dirs = fs.readdirSync(projectsDir); } catch { return false; }
+  return dirs.some((d) => fs.existsSync(path.join(projectsDir, d, `${sessionId}.jsonl`)));
+}
+
+// 저장된 명령에 --resume <id> 를 붙인다. 이전 --resume/--continue 는 떼어내 중복을 막는다.
+// sessionId가 null이면 resume 없이 원래 명령만 돌려준다.
+function buildResumeCommand(cmd, sessionId) {
+  const tokens = String(cmd || "").trim().split(/\s+/).filter(Boolean);
+  const base = tokens[0] || "";
+  if (!(base === "claude" || base.endsWith("/claude"))) return sessionId ? `claude --resume ${sessionId}` : "claude";
+  const kept = [];
+  for (let i = 0; i < tokens.length; i++) {
+    const t = tokens[i];
+    if (t === "--resume" || t === "-r") {
+      if (tokens[i + 1] && !tokens[i + 1].startsWith("-")) i++;
+      continue;
+    }
+    if (t === "--continue" || t === "-c") continue;
+    kept.push(t);
+  }
+  if (!sessionId) return kept.join(" ") || "claude";
+  return [...kept, "--resume", sessionId].join(" ");
+}
+
 const DEFAULT_PRESETS = ["계속해", "/compact"];
 
 function getPresets() {
@@ -209,14 +304,12 @@ function getBaseCommand(cmd) {
 
 function terminalRowsForWorker(w) {
   const rows = w.rows || 50;
-  const baseCommand = getBaseCommand(w.cmd || w.expectedCmd);
-  if (baseCommand === "claude" || baseCommand.endsWith("/claude")) {
-    return Math.max(rows, CLAUDE_MIN_ROWS);
-  }
-  return rows;
+  return isClaudeWorker(w) ? Math.max(rows, CLAUDE_MIN_ROWS) : rows;
 }
 
 function isClaudeWorker(w) {
+  // 재시작 후 tmux에서 복구된 워커는 cmd가 pane 명령(claude.exe)이라 이름으로는 못 알아본다 — 레지스트리에서 세션이 잡혔으면 Claude다
+  if (w?.claudeSessionId) return true;
   const baseCommand = getBaseCommand(w?.cmd || w?.expectedCmd);
   return baseCommand === "claude" || baseCommand.endsWith("/claude");
 }
@@ -659,20 +752,25 @@ function sendCommandWhenShellReady(sessionName, cmd, attempt = 0) {
   }, 200);
 }
 
-function spawnWorker(cwd, cmd, env) {
+// opts.id: 재시작 복원 시 기존 탭 번호를 그대로 쓴다(탭 순서·핀·제목이 id 기준이라 바뀌면 전부 어긋난다)
+function spawnWorker(cwd, cmd, env, opts = {}) {
   const config = loadConfig();
   cmd = cmd || config.defaultCommand || "claude";
-  const id = String(nextId++);
+  const id = opts.id ? String(opts.id) : String(nextId++);
+  if (Number(id) >= nextId) nextId = Number(id) + 1;
   const sessionName = "term-" + id;
-  const envArgs = Object.entries(sanitizeEnv(env)).flatMap(([key, value]) => ["-e", `${key}=${value}`]);
+  const cleanEnv = sanitizeEnv(env);
+  const envArgs = Object.entries(cleanEnv).flatMap(([key, value]) => ["-e", `${key}=${value}`]);
   tmuxExec(["new-session", "-d", "-s", sessionName, "-c", cwd, "-e", "CLAUDECODE=", ...envArgs]);
   sendCommandWhenShellReady(sessionName, cmd);
-  setSessionTitle(sessionName, "");
+  if (!opts.keepTitle) setSessionTitle(sessionName, "");
+  const title = opts.keepTitle ? getSessionTitle(sessionName) : "";
   const logs = [];
   workers.set(id, {
     sessionName,
     cwd,
     cmd,
+    env: cleanEnv,
     logs,
     status: "running",
     expectedCmd: getBaseCommand(cmd),
@@ -680,11 +778,14 @@ function spawnWorker(cwd, cmd, env) {
     exitReason: null,
     lastPaneCommand: null,
     lastAction: null,
-    title: "",
+    title,
     startedAt: Date.now(),
+    claudeSessionId: opts.claudeSessionId || null,
+    claudeName: null,
   });
   startPolling(id);
-  broadcast({ type: "spawned", id, cwd, cmd, status: "running", sessionName, title: "", startedAt: Date.now() });
+  persistWorker(id);
+  broadcast({ type: "spawned", id, cwd, cmd, status: "running", sessionName, title, startedAt: Date.now(), claudeName: null });
   return id;
 }
 
@@ -799,7 +900,7 @@ function sendWaitingPush(id) {
   const now = Date.now();
   if (now - (pushAlertTime.get(id) || 0) < PUSH_COOLDOWN_MS) return;
   pushAlertTime.set(id, now);
-  const label = w.title || `${w.cmd || "claude"} · ${path.basename(w.cwd || "")}`;
+  const label = w.title || w.claudeName || `${w.cmd || "claude"} · ${path.basename(w.cwd || "")}`;
   sendPushToAll({
     title: `#${id} ${label} — 대기 중`,
     body: waitingQuestion(w),
@@ -841,6 +942,7 @@ function pollOutput(id) {
     w.status = 'completed';
     w.aiState = null;
     w.exitReason = w.exitReason || inferExitReason(w, "tmux session ended or was killed externally.");
+    persistWorker(id);
     broadcast({ type: "status", id, status: "completed", reason: w.exitReason });
     return;
   }
@@ -860,6 +962,7 @@ function pollOutput(id) {
   const currentCwd = tmux(`display-message -t ${w.sessionName} -p "#{pane_current_path}"`).trim();
   if (currentCwd && currentCwd !== w.cwd) {
     w.cwd = currentCwd;
+    persistWorker(id);
     broadcast({ type: "cwd", id, cwd: currentCwd });
   }
   const currentPaneCmd = tmux(`display-message -t ${w.sessionName} -p "#{pane_current_command}"`).trim();
@@ -873,6 +976,7 @@ function pollOutput(id) {
       w.status = "completed";
       w.aiState = null;
       w.exitReason = inferExitReason(w, `Command '${w.expectedCmd}' exited and returned to shell '${currentPaneCmd}'.`);
+      persistWorker(id);
       broadcast({ type: "status", id, status: "completed", reason: w.exitReason });
       return;
     }
@@ -952,6 +1056,7 @@ function killWorker(id, reason) {
   w.status = 'stopped';
   w.aiState = null;
   w.exitReason = reason || "Stopped from dashboard.";
+  persistWorker(id);
   broadcast({ type: "status", id, status: "stopped", reason: w.exitReason });
   return true;
 }
@@ -1079,6 +1184,8 @@ function workerSummary(id, w) {
     status: (w.status === "completed" || w.status === "stopped") ? w.status : (isAlive(w.sessionName) ? "running" : (w.status || "stopped")),
     sessionName: w.sessionName,
     title: w.title || getSessionTitle(w.sessionName),
+    claudeSessionId: w.claudeSessionId || null,
+    claudeName: w.claudeName || null,
     logs: w.logs,
     aiState: w.aiState || null,
     exitReason: w.exitReason || null,
@@ -1262,9 +1369,12 @@ const server = http.createServer(async (req, res) => {
       lastAction: null,
       title: getSessionTitle(sessionName),
       startedAt: sessionCreatedAt(sessionName),
+      claudeSessionId: null,
+      claudeName: null,
     });
     startPolling(id);
-    broadcast({ type: "spawned", id, cwd, status: "running", sessionName, title: getSessionTitle(sessionName), startedAt: workers.get(id).startedAt });
+    persistWorker(id);
+    broadcast({ type: "spawned", id, cwd, status: "running", sessionName, title: getSessionTitle(sessionName), startedAt: workers.get(id).startedAt, claudeName: null });
     return json(res, 200, { id });
   }
 
@@ -1329,6 +1439,7 @@ const server = http.createServer(async (req, res) => {
       if (!isAlive(w.sessionName)) setSessionTitle(w.sessionName, "");
       workerResizeOwners.delete(String(id));
       forgetWorkerUiState(id);
+      forgetPersistedWorker(id);
       // 워커 관련 alert 쿨다운 키 정리 (issueAlertTime 무한 누적 방지)
       issueAlertTime.delete(`worker-waiting-${id}`);
       workers.delete(id);
@@ -1373,6 +1484,7 @@ const server = http.createServer(async (req, res) => {
       w.exitReason = null;
       w.seenExpectedCmd = false;
       startPolling(id);
+      persistWorker(id);
       broadcast({ type: "status", id, status: "running", reason: null });
       return json(res, 200, { ok: true });
     }
@@ -1657,6 +1769,8 @@ function recoverSessions() {
       lastAction: null,
       title: getSessionTitle(sessionName),
       startedAt: sessionCreatedAt(sessionName),
+      claudeSessionId: null,
+      claudeName: null,
     });
     startPolling(id);
     if (numId >= nextId) nextId = numId + 1;
@@ -1664,6 +1778,58 @@ function recoverSessions() {
   if (workers.size > 0) {
     console.log(`♻️  Recovered ${workers.size} session(s)`);
   }
+  restorePersistedWorkers();
+}
+
+// tmux 세션이 살아 있으면 저장된 명령·세션 ID만 덧입히고, 죽어 있으면(재부팅 등) 같은 탭 번호로 Claude 세션을 재개한다.
+function restorePersistedWorkers() {
+  const saved = loadState().workers || {};
+  let resumed = 0;
+  for (const [id, s] of Object.entries(saved)) {
+    if (!/^\d+$/.test(id) || !s) continue;
+    const numId = Number(id);
+    if (numId >= nextId) nextId = numId + 1;
+    const live = workers.get(id);
+    if (live) {
+      // pane 명령(claude.exe 등)보다 처음 띄울 때 쓴 명령이 정확하다
+      if (s.cmd) { live.cmd = s.cmd; live.expectedCmd = getBaseCommand(s.cmd); }
+      live.env = s.env || {};
+      live.claudeSessionId = s.claudeSessionId || null;
+      persistWorker(id);
+      continue;
+    }
+    if (s.status !== "running") { forgetPersistedWorker(id); continue; }
+    let blocked = null;
+    if (!s.claudeSessionId) blocked = "Server restarted and there was no Claude session to resume.";
+    else if (!s.cwd || !fs.existsSync(s.cwd)) blocked = `Server restarted but the folder no longer exists: ${s.cwd}`;
+    if (blocked) {
+      const sessionName = s.sessionName || `term-${id}`;
+      workers.set(id, {
+        sessionName,
+        cwd: s.cwd || "unknown",
+        cmd: s.cmd || "",
+        env: s.env || {},
+        logs: [],
+        status: "completed",
+        expectedCmd: getBaseCommand(s.cmd),
+        seenExpectedCmd: false,
+        exitReason: blocked,
+        lastPaneCommand: null,
+        lastAction: null,
+        title: getSessionTitle(sessionName),
+        startedAt: s.startedAt || null,
+        claudeSessionId: s.claudeSessionId || null,
+        claudeName: s.claudeName || null,
+      });
+      persistWorker(id);
+      continue;
+    }
+    const resumable = claudeTranscriptExists(s.claudeSessionId);
+    if (!resumable) console.log(`♻️  #${id}: no transcript for ${s.claudeSessionId}, starting a fresh Claude instead`);
+    spawnWorker(s.cwd, buildResumeCommand(s.cmd, resumable ? s.claudeSessionId : null), s.env, { id, keepTitle: true, claudeSessionId: resumable ? s.claudeSessionId : null });
+    resumed++;
+  }
+  if (resumed > 0) console.log(`♻️  Resumed ${resumed} Claude session(s) from saved state`);
 }
 
 function startTunnel() {
@@ -1842,6 +2008,8 @@ function checkTunnel() {
 
 server.listen(PORT, () => {
   recoverSessions();
+  syncClaudeSessions();
+  setInterval(syncClaudeSessions, CLAUDE_SESSION_SYNC_MS);
   initPush();
   console.log(`✅ TermHub running → http://localhost:${PORT}`);
   console.log(`🔑 Password: ${PASSWORD}`);

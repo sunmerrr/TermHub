@@ -22,6 +22,9 @@ function initWS() {
     document.getElementById('status-dot').classList.remove('off');
     sendResize(true);
     sendView(true);
+    // 서버가 재시작됐으면(재부팅 등) 워커 목록이 달라져 있다 — 다시 받아 유령 탭을 정리한다
+    if (wsConnectedBefore) loadAll();
+    wsConnectedBefore = true;
   };
   ws.onclose = () => {
     document.getElementById('status-dot').classList.add('off');
@@ -30,6 +33,7 @@ function initWS() {
   ws.onmessage = e => handleMsg(JSON.parse(e.data));
 }
 
+let wsConnectedBefore = false;
 let reconnectTimer = null;
 function scheduleReconnect(delay) {
   clearTimeout(reconnectTimer);
@@ -61,7 +65,8 @@ function sendView(force) {
 }
 
 function handleMsg(d) {
-  if (d.type === 'spawned') ensureCard(d.id, d.cwd, d.status, [], d.cmd, d.reason || null, d.title || '', d.sessionName || '', d.startedAt || null, null);
+  if (d.type === 'spawned') ensureCard(d.id, d.cwd, d.status, [], d.cmd, d.reason || null, d.title || '', d.sessionName || '', d.startedAt || null, null, d.claudeName || '');
+  if (d.type === 'claude') updateClaudeName(d.id, d.claudeName || '');
   if (d.type === 'ui_state') applyUiState(d.ui, false);
   if (d.type === 'log') appendLog(d.id, d.src, d.text);
   if (d.type === 'status') updateStatus(d.id, d.status, d.reason || null);
@@ -193,9 +198,14 @@ function loadAll() {
       Object.keys(customTitles).forEach(id => {
         if (!activeIds.has(String(id))) clearCustomTitle(id);
       });
+      // 서버에 없는 워커의 탭은 유령이다 — 화면에서만 지운다
+      document.querySelectorAll('#tab-bar .tab').forEach(tab => {
+        if (!activeIds.has(String(tab.dataset.id))) removeWorkerDom(tab.dataset.id);
+      });
       list.forEach(w => {
-        ensureCard(w.id, w.cwd, w.status, w.logs, w.cmd, w.exitReason || null, w.title || '', w.sessionName || '', w.startedAt || null, w.lastOutputAt || null);
+        ensureCard(w.id, w.cwd, w.status, w.logs, w.cmd, w.exitReason || null, w.title || '', w.sessionName || '', w.startedAt || null, w.lastOutputAt || null, w.claudeName || '');
         if (w.aiState) updateAIState(w.id, w.aiState);
+        if (w.claudeName) updateClaudeName(w.id, w.claudeName);
       });
     });
 }
