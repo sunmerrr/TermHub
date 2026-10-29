@@ -89,6 +89,8 @@ function ensureCard(id, cwd, status, logs, cmd, reason, title, sessionName, star
     '<div class="input-row" id="input-row-' + id + '"' + (status === 'stopped' || status === 'completed' ? ' style="display:none"' : '') + '>' +
       '<textarea id="inp-' + id + '" placeholder="Enter command..." rows="1"></textarea>' +
       '<button id="send-' + id + '">Send</button>' +
+      '<button class="attach-btn" id="attach-' + id + '" title="파일 첨부 (붙여넣기·드래그도 가능)">📎</button>' +
+      '<input type="file" id="file-' + id + '" multiple hidden>' +
       '<div class="toolkit-wrap">' +
         '<button class="toolkit-toggle" id="tk-btn-' + id + '">⌨</button>' +
         '<div class="toolkit-popup" id="tk-popup-' + id + '">' +
@@ -229,6 +231,40 @@ function bindCard(id, root) {
     inp.addEventListener('input', () => {
       inp.style.height = 'auto';
       inp.style.height = Math.min(inp.scrollHeight, 120) + 'px';
+    });
+    inp.addEventListener('paste', e => {
+      const files = e.clipboardData && e.clipboardData.files;
+      if (!files || !files.length) return;
+      e.preventDefault();
+      uploadFiles(id, files);
+    });
+  }
+
+  // 파일 첨부: 📎 버튼, 카드에 드래그 앤 드롭
+  const attachBtn = q('#attach-' + id);
+  const fileInput = q('#file-' + id);
+  if (attachBtn && fileInput) {
+    attachBtn.addEventListener('click', () => fileInput.click());
+    fileInput.addEventListener('change', () => {
+      if (fileInput.files.length) uploadFiles(id, fileInput.files);
+      fileInput.value = '';
+    });
+  }
+  const dropTarget = root.classList && root.classList.contains('card') ? root : q('.card');
+  if (dropTarget) {
+    dropTarget.addEventListener('dragover', e => {
+      if (!e.dataTransfer || !Array.from(e.dataTransfer.types).includes('Files')) return;
+      e.preventDefault();
+      dropTarget.classList.add('dropping');
+    });
+    dropTarget.addEventListener('dragleave', e => {
+      if (!dropTarget.contains(e.relatedTarget)) dropTarget.classList.remove('dropping');
+    });
+    dropTarget.addEventListener('drop', e => {
+      dropTarget.classList.remove('dropping');
+      if (!e.dataTransfer || !e.dataTransfer.files.length) return;
+      e.preventDefault();
+      uploadFiles(id, e.dataTransfer.files);
     });
   }
 
@@ -763,6 +799,62 @@ function sendSpecialKey(id, key) {
 function sendKeys(id, keys) {
   notifyActive(id);
   apiPost('/api/key', { id, keys });
+}
+
+// 올린 파일의 서버 경로를 입력창 끝에 붙인다 — 사용자가 메시지를 덧붙여 보내면 AI가 그 경로를 읽는다
+function appendPathToInput(id, filePath) {
+  document.querySelectorAll('#inp-' + id).forEach(inp => {
+    const cur = inp.value;
+    inp.value = cur + (cur && !/\s$/.test(cur) ? ' ' : '') + filePath + ' ';
+    inp.style.height = 'auto';
+    inp.style.height = Math.min(inp.scrollHeight, 120) + 'px';
+  });
+}
+
+function setAttachBusy(id, busy) {
+  document.querySelectorAll('#attach-' + id).forEach(btn => {
+    btn.disabled = busy;
+    btn.textContent = busy ? '⏳' : '📎';
+  });
+}
+
+function uploadFile(id, file) {
+  return fetch(scopedApiUrl('/api/upload?id=' + encodeURIComponent(id)), {
+    method: 'POST',
+    headers: {
+      'Content-Type': file.type || 'application/octet-stream',
+      'X-File-Name': encodeURIComponent(file.name || 'file')
+    },
+    body: file,
+    credentials: 'include'
+  }).then(r => {
+    if (r.status === 401) { showLogin(); throw new Error('unauthorized'); }
+    return r.json().catch(() => ({})).then(d => {
+      if (!r.ok || !d.ok) throw new Error(d.error || ('upload failed (' + r.status + ')'));
+      return d;
+    });
+  });
+}
+
+function uploadFiles(id, fileList) {
+  const files = Array.from(fileList || []);
+  if (!files.length) return Promise.resolve();
+  setAttachBusy(id, true);
+  const failed = [];
+  // 순서대로 하나씩 올려 입력창에 붙는 경로 순서가 고른 순서와 같게 한다
+  let chain = Promise.resolve();
+  files.forEach(file => {
+    chain = chain
+      .then(() => uploadFile(id, file))
+      .then(d => appendPathToInput(id, d.path))
+      .catch(e => { if (e.message !== 'unauthorized') failed.push(file.name + ': ' + e.message); });
+  });
+  return chain.then(() => {
+    setAttachBusy(id, false);
+    if (failed.length) alert('첨부 실패\n' + failed.join('\n'));
+    const inp = document.querySelector('.tab-panel.active #inp-' + id) || document.getElementById('inp-' + id);
+    if (inp) inp.focus();
+  });
 }
 
 function sendInput(id) {

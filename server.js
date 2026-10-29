@@ -30,6 +30,11 @@ const STATE_PATH = path.join(__dirname, ".termhub-state.json");
 // Claude Code가 실행 중인 세션마다 남기는 레지스트리 (<pid>.json: sessionId, tmux 위치, 세션 간 메시징 이름)
 const CLAUDE_SESSIONS_DIR = path.join(os.homedir(), ".claude", "sessions");
 const CLAUDE_SESSION_SYNC_MS = 5000;
+// 대시보드에서 올린 첨부 파일은 워커와 같은 머신(이 서버)에 저장되므로 Claude/Codex가 경로로 바로 읽는다
+const UPLOAD_DIR = path.join(os.homedir(), ".termhub", "uploads");
+const UPLOAD_MAX_BYTES = Math.max(1, Number(process.env.UPLOAD_MAX_MB || 20)) * 1024 * 1024;
+const UPLOAD_RETENTION_DAYS = Math.max(1, Number(process.env.UPLOAD_RETENTION_DAYS || 7));
+const UPLOAD_CLEANUP_INTERVAL_MS = 6 * 60 * 60 * 1000;
 const ENABLE_PREVIEW_PORT_SCAN = process.env.ENABLE_PREVIEW_PORT_SCAN === "1";
 
 // workerId(문자열) → Set<number> : 워커별 감지된 포트 목록
@@ -1115,6 +1120,66 @@ function readBody(req) {
   });
 }
 
+// 바이너리 본문을 상한까지만 읽는다 — 상한을 넘으면 연결을 끊어 메모리에 쌓이지 않게 한다
+function readRawBody(req, limit) {
+  return new Promise((resolve, reject) => {
+    const chunks = [];
+    let size = 0;
+    req.on("data", (c) => {
+      size += c.length;
+      if (size > limit) {
+        req.destroy();
+        reject(new Error("too large"));
+        return;
+      }
+      chunks.push(c);
+    });
+    req.on("end", () => resolve(Buffer.concat(chunks)));
+    req.on("error", reject);
+  });
+}
+
+function sanitizeUploadName(name) {
+  const base = path.basename(String(name || ""))
+    .replace(/[^\p{L}\p{N}._-]+/gu, "_")
+    .replace(/^[._]+/, "")
+    .slice(0, 80);
+  return base || "file";
+}
+
+function saveUpload(workerId, name, buf) {
+  const dir = path.join(UPLOAD_DIR, String(workerId));
+  fs.mkdirSync(dir, { recursive: true });
+  const d = new Date();
+  const pad = (n) => String(n).padStart(2, "0");
+  // 파일명에 로컬 시각을 넣어 목록에서 언제 올린 건지 바로 보이게 한다
+  const stamp = `${d.getFullYear()}${pad(d.getMonth() + 1)}${pad(d.getDate())}-${pad(d.getHours())}${pad(d.getMinutes())}${pad(d.getSeconds())}`;
+  const safeName = sanitizeUploadName(name);
+  let file = path.join(dir, `${stamp}-${safeName}`);
+  for (let n = 2; fs.existsSync(file); n++) file = path.join(dir, `${stamp}-${n}-${safeName}`);
+  fs.writeFileSync(file, buf);
+  return file;
+}
+
+function cleanupUploads() {
+  if (!fs.existsSync(UPLOAD_DIR)) return;
+  const cutoff = Date.now() - UPLOAD_RETENTION_DAYS * 24 * 60 * 60 * 1000;
+  for (const sub of fs.readdirSync(UPLOAD_DIR)) {
+    const dir = path.join(UPLOAD_DIR, sub);
+    let entries;
+    try { entries = fs.readdirSync(dir); } catch (e) { continue; }
+    for (const f of entries) {
+      const file = path.join(dir, f);
+      try {
+        if (fs.statSync(file).mtimeMs < cutoff) fs.unlinkSync(file);
+      } catch (e) {
+        console.error(`⚠️  Failed to clean upload ${file}: ${e.message}`);
+      }
+    }
+    try { if (!fs.readdirSync(dir).length) fs.rmdirSync(dir); } catch (e) { /* 다른 업로드가 동시에 들어오면 비어 있지 않을 수 있다 */ }
+  }
+}
+
 function json(res, code, obj) {
   res.writeHead(code, { "Content-Type": "application/json" });
   res.end(JSON.stringify(obj));
@@ -1443,6 +1508,31 @@ const server = http.createServer(async (req, res) => {
     if (!canAccessWorker(ctx, id)) return json(res, 403, { ok: false, error: "forbidden" });
     const ok = sendInput(id, text);
     return json(res, 200, { ok });
+  }
+
+  // 본문은 파일 바이트 그대로, 파일명은 헤더로 — multipart 파서 없이 처리
+  if (method === "POST" && url === "/api/upload") {
+    const id = parsedUrl.searchParams.get("id");
+    if (!canAccessWorker(ctx, id)) return json(res, 403, { ok: false, error: "forbidden" });
+    if (!workers.has(String(id))) return json(res, 404, { ok: false, error: "no such worker" });
+    const declared = Number(req.headers["content-length"] || 0);
+    if (declared > UPLOAD_MAX_BYTES) return json(res, 413, { ok: false, error: `file exceeds ${UPLOAD_MAX_BYTES / 1024 / 1024}MB` });
+    let buf;
+    try {
+      buf = await readRawBody(req, UPLOAD_MAX_BYTES);
+    } catch (e) {
+      return json(res, 413, { ok: false, error: `file exceeds ${UPLOAD_MAX_BYTES / 1024 / 1024}MB` });
+    }
+    if (!buf.length) return json(res, 400, { ok: false, error: "empty file" });
+    let name = "file";
+    try { name = decodeURIComponent(String(req.headers["x-file-name"] || "")); } catch (e) { /* 잘못된 인코딩이면 기본 이름 사용 */ }
+    try {
+      const file = saveUpload(id, name, buf);
+      return json(res, 200, { ok: true, path: file, name: path.basename(file), size: buf.length });
+    } catch (e) {
+      console.error(`⚠️  Upload failed: ${e.message}`);
+      return json(res, 500, { ok: false, error: "failed to save file" });
+    }
   }
 
   if (method === "POST" && url === "/api/remove") {
@@ -2027,6 +2117,8 @@ server.listen(PORT, () => {
   syncClaudeSessions();
   setInterval(syncClaudeSessions, CLAUDE_SESSION_SYNC_MS);
   initPush();
+  cleanupUploads();
+  setInterval(cleanupUploads, UPLOAD_CLEANUP_INTERVAL_MS);
   console.log(`✅ TermHub running → http://localhost:${PORT}`);
   console.log(`🔑 Password: ${PASSWORD}`);
   console.log(`📺 View tmux session: tmux attach -t term-1`);

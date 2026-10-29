@@ -158,6 +158,9 @@ tmux attach -t term-1   # 워커 #1
 tmux attach -t term-2   # 워커 #2
 ```
 
+### 파일 첨부
+입력창 옆 📎 클릭, 클립보드 이미지 붙여넣기, 워커 카드에 파일 드롭으로 첨부합니다. 파일은 TermHub가 돌아가는 머신의 `~/.termhub/uploads/<워커>/`에 저장되고 그 경로가 입력창에 붙으므로, 메시지를 보내면 Claude/Codex가 바로 읽을 수 있습니다. 업로드는 20MB까지(`UPLOAD_MAX_MB`), 7일 뒤 자동 삭제됩니다(`UPLOAD_RETENTION_DAYS`).
+
 ### 레이아웃 전환
 헤더의 **Tab / Split** 버튼으로 전환. 선택은 브라우저에 저장됩니다.
 

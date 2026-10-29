@@ -160,6 +160,9 @@ tmux attach -t term-1   # Worker #1
 tmux attach -t term-2   # Worker #2
 ```
 
+### Attach files
+Click 📎 next to the input box, paste an image from the clipboard, or drop a file onto a worker card. The file is saved on the TermHub machine under `~/.termhub/uploads/<worker>/` and its path is appended to the input box, so Claude/Codex can read it once you send the message. Uploads are capped at 20MB (`UPLOAD_MAX_MB`) and deleted after 7 days (`UPLOAD_RETENTION_DAYS`).
+
 ### Switch layouts
 Use the **Tab / Split** buttons in the header. Your choice is saved in the browser.
 
