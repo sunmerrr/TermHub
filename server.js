@@ -304,7 +304,8 @@ function getBaseCommand(cmd) {
 
 function terminalRowsForWorker(w) {
   const rows = w.rows || 50;
-  return isClaudeWorker(w) ? Math.max(rows, CLAUDE_MIN_ROWS) : rows;
+  // 전체 화면(alternate screen) TUI(codex 등)는 스크롤백을 남기지 않아 보이는 행만 캡처된다 — Claude처럼 pane을 키워 대화 전체가 화면 안에 들어오게 한다
+  return isClaudeWorker(w) || w.alternateScreen ? Math.max(rows, CLAUDE_MIN_ROWS) : rows;
 }
 
 function isClaudeWorker(w) {
@@ -315,8 +316,19 @@ function isClaudeWorker(w) {
 }
 
 function displayOutputForWorker(w, output) {
-  if (!isClaudeWorker(w)) return output;
-  const lines = output.split("\n");
+  if (!isClaudeWorker(w) && !w.alternateScreen) return output;
+  let lines = output.split("\n");
+  if (w.alternateScreen) {
+    // 전체 화면 TUI는 입력창을 pane 맨 아래(500행)에 그려 대화와 입력창 사이에 빈 줄이 수백 개 생긴다 — 3줄 이상 이어지는 빈 줄은 2줄로 줄인다
+    const collapsed = [];
+    let blankRun = 0;
+    for (const line of lines) {
+      blankRun = line.trim() === "" ? blankRun + 1 : 0;
+      if (blankRun > 2) continue;
+      collapsed.push(line);
+    }
+    lines = collapsed;
+  }
   while (lines.length > 1 && lines[lines.length - 1].trim() === "") {
     lines.pop();
   }
@@ -946,6 +958,12 @@ function pollOutput(id) {
     broadcast({ type: "status", id, status: "completed", reason: w.exitReason });
     return;
   }
+  // 경로·명령·alternate screen 여부를 한 번에 조회 (경로에 '|'가 있을 수 있어 경로를 맨 뒤에 둔다)
+  const [altFlag, currentPaneCmd, ...pathParts] = tmux(
+    `display-message -t ${w.sessionName} -p "#{alternate_on}|#{pane_current_command}|#{pane_current_path}"`
+  ).trim().split("|");
+  const currentCwd = pathParts.join("|");
+  w.alternateScreen = altFlag === "1";
   const cols = w.cols || 80;
   const rows = terminalRowsForWorker(w);
   // 매초 2개의 resize 프로세스를 띄우지 않도록 크기가 바뀌었을 때만 적용 (외부 attach 대비 30초마다 재적용)
@@ -959,13 +977,11 @@ function pollOutput(id) {
   const output = displayOutputForWorker(w, tmux(`capture-pane -t ${w.sessionName} -p -S -500 -J`));
 
   // Track actual working directory
-  const currentCwd = tmux(`display-message -t ${w.sessionName} -p "#{pane_current_path}"`).trim();
   if (currentCwd && currentCwd !== w.cwd) {
     w.cwd = currentCwd;
     persistWorker(id);
     broadcast({ type: "cwd", id, cwd: currentCwd });
   }
-  const currentPaneCmd = tmux(`display-message -t ${w.sessionName} -p "#{pane_current_command}"`).trim();
   if (currentPaneCmd) {
     w.lastPaneCommand = currentPaneCmd;
     if (w.expectedCmd && currentPaneCmd === w.expectedCmd) w.seenExpectedCmd = true;
