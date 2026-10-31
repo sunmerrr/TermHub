@@ -1315,12 +1315,20 @@ function canAccessWorker(ctx, workerId) {
 
 // 워커 크기의 주인은 하나의 소켓이다. 주인이 없으면 처음 크기를 보낸 소켓이 주인이 되고,
 // 'active'(입력)로만 주인이 바뀐다. 여러 기기가 서로 크기를 덮어써서 TUI가 계속 다시 그리는 것을 막는다.
+// 주인이 끊긴 뒤(잠자기·재연결) 폭이 다른 기기가 접속만 해도 크기를 가져가면 Codex 같은 전체 화면 TUI가
+// 500줄을 처음부터 다시 그려 깜박인다 — 이미 크기가 잡힌 워커는 같은 크기(같은 기기의 재연결)일 때만
+// 접속으로 주인이 되고, 다른 크기는 그 기기에서 실제로 입력('active')해야 넘어간다.
 function setWorkerSize(workerId, size, owner) {
   const w = workers.get(String(workerId));
   if (!w) return;
   const currentOwner = workerResizeOwners.get(String(workerId));
   if (currentOwner && currentOwner !== owner) return;
-  if (!currentOwner) workerResizeOwners.set(String(workerId), owner);
+  if (!currentOwner) {
+    const hasSize = w.cols && w.rows;
+    const sameSize = w.cols === size.cols && w.rows === size.rows;
+    if (hasSize && !sameSize) return;
+    workerResizeOwners.set(String(workerId), owner);
+  }
   w.cols = size.cols;
   w.rows = size.rows;
 }
