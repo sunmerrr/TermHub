@@ -26,6 +26,8 @@ const PREVIEW_HEALTH_INTERVAL_MS = Math.max(
 );
 const PREVIEW_CLOSE_FAILURES = Math.max(1, Number(process.env.PREVIEW_CLOSE_FAILURES || 1));
 const CLAUDE_MIN_ROWS = Math.max(50, Number(process.env.CLAUDE_MIN_ROWS || 500));
+// 리사이즈 후 TUI가 화면을 다시 그리는 동안 빈 캡처를 무시하는 시간 (1초 폴링 두 번 분량)
+const RESIZE_SETTLE_MS = 2500;
 const STATE_PATH = path.join(__dirname, ".termhub-state.json");
 // Claude Code가 실행 중인 세션마다 남기는 레지스트리 (<pid>.json: sessionId, tmux 위치, 세션 간 메시징 이름)
 const CLAUDE_SESSIONS_DIR = path.join(os.homedir(), ".claude", "sessions");
@@ -338,6 +340,12 @@ function displayOutputForWorker(w, output) {
     lines.pop();
   }
   return lines.join("\n");
+}
+
+function countNonBlankLines(output) {
+  let n = 0;
+  for (const line of output.split("\n")) if (line.trim() !== "") n++;
+  return n;
 }
 
 function rememberAction(w, type, detail) {
@@ -974,6 +982,8 @@ function pollOutput(id) {
   // 매초 2개의 resize 프로세스를 띄우지 않도록 크기가 바뀌었을 때만 적용 (외부 attach 대비 30초마다 재적용)
   const sizeKey = `${cols}x${rows}`;
   if (w.appliedSize !== sizeKey || Date.now() - (w.appliedSizeAt || 0) > 30000) {
+    // 같은 크기 재적용은 TUI가 다시 그리지 않으므로 크기가 실제로 바뀐 때만 기록한다
+    if (w.appliedSize !== sizeKey) w.sizeChangedAt = Date.now();
     tmux(`resize-pane -t ${w.sessionName} -x ${cols} -y ${rows}`);
     tmux(`resize-window -t ${w.sessionName} -x ${cols} -y ${rows}`);
     w.appliedSize = sizeKey;
