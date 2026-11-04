@@ -991,6 +991,13 @@ function pollOutput(id) {
   }
   const output = displayOutputForWorker(w, tmux(`capture-pane -t ${w.sessionName} -p -S -500 -J`));
 
+  // 크기가 바뀌면 전체 화면 TUI(codex 등)는 화면을 지우고 다시 그리는데, 그 사이 캡처하면 거의 빈 화면이 잡힌다.
+  // 이 프레임을 방송하면 대시보드가 비었다 다시 차며 깜박이므로, 리사이즈 직후 내용이 절반 이하로 줄어든 캡처는 건너뛴다.
+  if (w.sizeChangedAt && Date.now() - w.sizeChangedAt < RESIZE_SETTLE_MS && lastCapture[id] !== undefined) {
+    const before = countNonBlankLines(lastCapture[id]);
+    if (before >= 10 && countNonBlankLines(output) < before / 2) return;
+  }
+
   // Track actual working directory
   if (currentCwd && currentCwd !== w.cwd) {
     w.cwd = currentCwd;
