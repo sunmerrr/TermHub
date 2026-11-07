@@ -1,16 +1,14 @@
 // ── Layout & Tab Management ──
 
-let layout = localStorage.getItem('layout') || 'tab';
+// 레이아웃 전환 UI를 없앴다 — 예전에 저장된 'split' 값이 남아 있어도 빠져나올 방법이 없으므로 항상 tab으로 고정
+let layout = 'tab';
 let activeTab = null;
 
 function setLayout(mode) {
   layout = mode;
-  localStorage.setItem('layout', mode);
   document.getElementById('tab-mode').style.display = mode === 'tab' ? 'flex' : 'none';
   document.getElementById('split-mode').style.display = mode === 'split' ? 'block' : 'none';
   document.getElementById('split-content').style.display = mode === 'split' ? 'grid' : 'none';
-  document.getElementById('layout-tab-btn').classList.toggle('layout-active', mode === 'tab');
-  document.getElementById('layout-split-btn').classList.toggle('layout-active', mode === 'split');
   updateSplitGrid();
   setTimeout(sendResize, 50);
   if (typeof sendView === 'function') sendView();

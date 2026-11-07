@@ -82,31 +82,6 @@ header h1 {
   border-color: #2ea043;
 }
 
-.header-divider {
-  width: 1px;
-  height: 18px;
-  background: #30363d;
-  flex-shrink: 0;
-}
-
-.layout-group {
-  display: flex;
-  gap: 0;
-}
-
-.layout-group .header-btn {
-  border-radius: 0;
-}
-
-.layout-group .header-btn:first-child {
-  border-radius: 6px 0 0 6px;
-}
-
-.layout-group .header-btn:last-child {
-  border-radius: 0 6px 6px 0;
-  border-left: none;
-}
-
 .header-btn.layout-active {
   background: #1f6feb;
   border-color: #1f6feb;
@@ -1335,11 +1310,6 @@ body[data-scoped-worker] .preset-add {
 /* ── Mobile ────────────────────────────────────────── */
 
 @media (max-width: 768px) {
-  #layout-tab-btn,
-  #layout-split-btn {
-    display: none;
-  }
-
   .toolbar {
     flex-wrap: wrap;
     gap: 6px;

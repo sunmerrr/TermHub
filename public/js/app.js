@@ -76,8 +76,6 @@ document.getElementById('scan-btn').addEventListener('click', scanSessions);
 document.getElementById('push-btn').addEventListener('click', togglePush);
 document.getElementById('add-fav-btn').addEventListener('click', addFavorite);
 document.getElementById('save-tpl-btn').addEventListener('click', saveCurrentAsTemplate);
-document.getElementById('layout-tab-btn').addEventListener('click', () => setLayout('tab'));
-document.getElementById('layout-split-btn').addEventListener('click', () => setLayout('split'));
 
 document.addEventListener('click', e => {
   closeDropdown();
