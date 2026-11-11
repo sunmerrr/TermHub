@@ -1736,17 +1736,27 @@ const server = http.createServer(async (req, res) => {
 
       if (file) {
         // 특정 파일의 diff — HEAD가 있으면 HEAD 대비, 없으면 워킹트리
+        // --no-color는 diff 하위 명령의 옵션이다 — git 바로 뒤에 두면 git이 명령 전체를 거부한다
         let diff = '';
         try {
-          diff = execFileSync('git', ['-C', cwd, '--no-color', 'diff', 'HEAD', '--', file], execOpts);
+          diff = execFileSync('git', ['-C', cwd, 'diff', '--no-color', 'HEAD', '--', file], execOpts);
         } catch (_) {
-          diff = execFileSync('git', ['-C', cwd, '--no-color', 'diff', '--', file], execOpts);
+          diff = execFileSync('git', ['-C', cwd, 'diff', '--no-color', '--', file], execOpts);
+        }
+        // 아직 추적되지 않는 새 파일은 위 diff에 나오지 않으므로 빈 파일과 비교한다 (차이가 있으면 종료 코드 1)
+        if (!diff && execFileSync('git', ['-C', cwd, 'ls-files', '--others', '--exclude-standard', '--', file], execOpts).trim()) {
+          try {
+            diff = execFileSync('git', ['-C', cwd, 'diff', '--no-color', '--no-index', '--', '/dev/null', file], execOpts);
+          } catch (e) {
+            diff = e.stdout || '';
+          }
         }
         return json(res, 200, { diff });
       } else {
         // 파일 목록: git status --porcelain (untracked 포함)
         const status = execFileSync('git', ['-C', cwd, 'status', '--porcelain'], execOpts);
-        const files = status.trim().split('\n').filter(Boolean).map(line => {
+        // trim()하면 첫 줄의 상태 칸(" M")까지 깎여 첫 파일 이름이 한 글자 잘린다 — 줄 끝만 정리한다
+        const files = status.replace(/\s+$/, '').split('\n').filter(Boolean).map(line => {
           const xy = line.substring(0, 2).trim();
           const filePath = line.substring(3);
           // 상태 매핑: M=수정, A=추가, D=삭제, ?=untracked(신규), R=이름변경
@@ -1760,7 +1770,7 @@ const server = http.createServer(async (req, res) => {
 
         let stat = '';
         try {
-          stat = execFileSync('git', ['-C', cwd, '--no-color', 'diff', '--stat', 'HEAD'], execOpts).trim();
+          stat = execFileSync('git', ['-C', cwd, 'diff', '--no-color', '--stat', 'HEAD'], execOpts).trim();
         } catch (_) { /* no HEAD yet */ }
 
         return json(res, 200, { files, stat });
