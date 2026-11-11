@@ -79,7 +79,7 @@ function ensureCard(id, cwd, status, logs, cmd, reason, title, sessionName, star
       '<span class="badge' + (status === 'stopped' ? ' stopped' : '') + (status === 'completed' ? ' completed' : '') + '" id="badge-' + id + '">' + status + '</span>' +
       cardActionButtonsHtml(id, status) +
     '</div>' +
-    '<div class="card-cwd"><span class="cwd-path">' + displayPath(cwd) + '</span><span class="card-task" id="task-' + id + '"></span></div>' +
+    '<div class="card-cwd"><span class="cwd-path">' + displayPath(cwd) + '</span><span class="card-git" id="git-' + id + '"></span><span class="card-task" id="task-' + id + '"></span></div>' +
     '<div class="exit-reason" id="exit-reason-' + id + '"></div>' +
     '<div class="logs-wrap">' +
       '<div class="logs" id="logs-' + id + '"></div>' +
@@ -137,7 +137,7 @@ function ensureCard(id, cwd, status, logs, cmd, reason, title, sessionName, star
   tab.dataset.title = title || '';
   tab.dataset.claudeName = claudeName || '';
   var folder = cwd.replace(/\/$/, '').split('/').pop() || cwd;
-  tab.innerHTML = '<span class="tab-dot' + (status === 'stopped' ? ' stopped' : '') + (status === 'completed' ? ' completed' : '') + '" id="tab-dot-' + id + '"></span><span class="tab-label" id="tab-label-' + id + '">#' + id + ' ' + (cmd || 'claude') + ' · ' + folder + '</span>';
+  tab.innerHTML = '<span class="tab-dot' + (status === 'stopped' ? ' stopped' : '') + (status === 'completed' ? ' completed' : '') + '" id="tab-dot-' + id + '"></span><span class="tab-label" id="tab-label-' + id + '">#' + id + ' ' + (cmd || 'claude') + ' · ' + folder + '</span><span class="tab-changes" id="tab-changes-' + id + '"></span>';
   tab.dataset.pinned = (typeof uiState !== 'undefined' && uiState.pinned.map(String).includes(String(id))) ? '1' : '';
   tab.addEventListener('click', () => selectTab(id, true));
   tab.addEventListener('dblclick', e => {
@@ -794,6 +794,18 @@ function updateCwd(id, cwd) {
   const tab = document.querySelector('.tab[data-id="' + id + '"]');
   if (tab) tab.dataset.cwd = cwd;
   renderTitle(id, cwd);
+}
+
+// git 브랜치·변경 파일 수 — 카드 경로 줄에 브랜치, 탭에는 변경이 있을 때만 개수를 붙인다
+function updateGitInfo(id, git) {
+  const changes = git && typeof git.changes === 'number' ? git.changes : 0;
+  document.querySelectorAll('#git-' + id).forEach(el => {
+    el.textContent = git ? '⎇ ' + git.branch + (changes ? ' · ' + changes + ' changed' : '') : '';
+  });
+  document.querySelectorAll('#tab-changes-' + id).forEach(el => {
+    el.textContent = changes ? '±' + changes : '';
+    el.title = changes ? (git.branch + ' · 변경 파일 ' + changes + '개') : '';
+  });
 }
 
 // Claude가 pane 제목에 쓰는 작업 요약 — 카드 경로 줄 오른쪽과 탭 툴팁에 보여준다

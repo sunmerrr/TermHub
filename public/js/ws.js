@@ -89,6 +89,7 @@ function handleMsg(d) {
   if (d.type === 'cwd') updateCwd(d.id, d.cwd);
   if (d.type === 'aiState') updateAIState(d.id, d.state, d.since);
   if (d.type === 'task') updateTask(d.id, d.task);
+  if (d.type === 'git') updateGitInfo(d.id, d.git);
   if (d.type === 'preview_detected') ensurePreview(d.workerId, d.port);
   if (d.type === 'preview_prompt') showPreviewPrompt(d.workerId, d.port, d.contentType);
   if (d.type === 'preview_tunnel') updatePreviewTunnel(d.port, d.url);
@@ -222,6 +223,7 @@ function loadAll() {
         ensureCard(w.id, w.cwd, w.status, w.logs, w.cmd, w.exitReason || null, w.title || '', w.sessionName || '', w.startedAt || null, w.lastOutputAt || null, w.claudeName || '');
         if (w.aiState) updateAIState(w.id, w.aiState, w.aiStateAt);
         updateTask(w.id, w.task || '');
+        updateGitInfo(w.id, w.git || null);
         if (w.claudeName) updateClaudeName(w.id, w.claudeName);
       });
     });

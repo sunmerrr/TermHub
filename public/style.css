@@ -443,6 +443,22 @@ header h1 {
   white-space: nowrap;
 }
 
+.card-git {
+  flex-shrink: 0;
+  white-space: nowrap;
+  color: #8b949e;
+}
+
+.tab-changes {
+  font-size: 10px;
+  color: #d29922;
+  font-variant-numeric: tabular-nums;
+}
+
+.tab-changes:empty {
+  display: none;
+}
+
 .card-task {
   margin-left: auto;
   min-width: 0;

@@ -1017,6 +1017,54 @@ function sendWaitingAlert(id) {
 
 const IDLE_THRESHOLD = 5000; // 5 seconds of no output change → idle
 
+// ── 워커별 git 브랜치·변경 파일 수 ──
+// 여러 세션이 같은 저장소를 건드리는지 탭에서 바로 보이게 한다. 같은 폴더의 워커끼리는 한 번만 조회하고,
+// 폴링 루프(execSync)를 막지 않도록 비동기로 돌린다.
+const GIT_INFO_INTERVAL_MS = 15000;
+const gitInfoInFlight = new Set();
+
+function execFileText(cmd, args) {
+  return new Promise((resolve) => {
+    execFile(cmd, args, { encoding: "utf8", timeout: 5000, maxBuffer: 4 * 1024 * 1024 }, (err, stdout) => {
+      resolve(err ? null : stdout);
+    });
+  });
+}
+
+async function readGitInfo(cwd) {
+  const branch = await execFileText("git", ["-C", cwd, "rev-parse", "--abbrev-ref", "HEAD"]);
+  if (branch === null) return null;
+  const status = await execFileText("git", ["-C", cwd, "status", "--porcelain"]);
+  return {
+    branch: branch.trim(),
+    changes: status === null ? null : status.split("\n").filter(Boolean).length,
+  };
+}
+
+function refreshGitInfo() {
+  const byCwd = new Map();
+  for (const [id, w] of workers) {
+    if (w.status !== "running" || !w.cwd) continue;
+    if (!byCwd.has(w.cwd)) byCwd.set(w.cwd, []);
+    byCwd.get(w.cwd).push(id);
+  }
+  for (const [cwd, ids] of byCwd) {
+    if (gitInfoInFlight.has(cwd)) continue;
+    gitInfoInFlight.add(cwd);
+    readGitInfo(cwd).then((info) => {
+      gitInfoInFlight.delete(cwd);
+      for (const id of ids) {
+        const w = workers.get(id);
+        if (!w || w.cwd !== cwd) continue;
+        const prev = w.git || null;
+        if (prev === info || (prev && info && prev.branch === info.branch && prev.changes === info.changes)) continue;
+        w.git = info;
+        broadcast({ type: "git", id, git: info });
+      }
+    });
+  }
+}
+
 // Claude Code는 pane 제목을 "<상태 글리프> <작업 요약>"으로 바꾼다(예: "✳ 시리즈 업데이트 확인").
 // 글리프는 실제 상태와 어긋나는 경우가 있어(busy인데 ✳) 상태 판정에는 쓰지 않고 요약 문구만 표시용으로 쓴다.
 function claudeTaskFromTitle(title) {
@@ -1099,6 +1147,7 @@ function pollOutput(id) {
     w.cwd = currentCwd;
     persistWorker(id);
     broadcast({ type: "cwd", id, cwd: currentCwd });
+    setTimeout(refreshGitInfo, 0);
   }
   if (currentPaneCmd) {
     w.lastPaneCommand = currentPaneCmd;
@@ -1393,6 +1442,7 @@ function workerSummary(id, w) {
     aiState: w.aiState || null,
     aiStateAt: w.aiStateAt || null,
     task: w.task || "",
+    git: w.git || null,
     exitReason: w.exitReason || null,
     startedAt: w.startedAt || null,
     lastOutputAt: w.lastChangeTime || null
@@ -1428,7 +1478,7 @@ function canReceiveMessage(ctx, obj) {
   if (obj.type === "preview_tunnel") {
     return detectedPorts.get(workerId)?.has(Number(obj.port)) || false;
   }
-  return ["spawned", "log", "status", "cwd", "aiState", "task", "snapshot", "title", "presets", "preview_detected", "preview_prompt", "preview_closed"].includes(obj.type);
+  return ["spawned", "log", "status", "cwd", "aiState", "task", "git", "snapshot", "title", "presets", "preview_detected", "preview_prompt", "preview_closed"].includes(obj.type);
 }
 
 function canAccessWorker(ctx, workerId) {
@@ -2270,6 +2320,8 @@ server.listen(PORT, () => {
   recoverSessions();
   syncClaudeSessions();
   setInterval(syncClaudeSessions, CLAUDE_SESSION_SYNC_MS);
+  refreshGitInfo();
+  setInterval(refreshGitInfo, GIT_INFO_INTERVAL_MS);
   initPush();
   cleanupUploads();
   setInterval(cleanupUploads, UPLOAD_CLEANUP_INTERVAL_MS);
