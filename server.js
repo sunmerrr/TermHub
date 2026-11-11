@@ -1026,12 +1026,12 @@ function claudeTaskFromTitle(title) {
   return text.slice(0, 120);
 }
 
-// 레지스트리의 busy/idle은 Claude가 직접 기록하므로 화면 변화로 추측하는 것보다 정확하다.
-// 다만 권한 확인 메뉴가 떠 있을 때 무슨 값이 되는지 확인되지 않아 대기 판정은 화면 패턴을 먼저 본다.
-function registryAiState(reg, output) {
-  if (!reg || (reg.status !== "busy" && reg.status !== "idle")) return null;
-  if (detectWaiting(output)) return "waiting";
-  return reg.status === "busy" ? "working" : "idle";
+// 레지스트리 status는 Claude가 직접 기록하므로 화면으로 추측하는 것보다 정확하다(2.1.322 실측):
+// 작업 중 busy, 권한 확인·AskUserQuestion 질문 중 waiting, 끝나거나 Esc로 취소하면 idle.
+// 화면 패턴(detectWaiting)은 대화 내용의 "approve …?" 같은 문장에도 걸리므로 레지스트리가 있으면 쓰지 않는다.
+const REGISTRY_AI_STATES = { busy: "working", waiting: "waiting", idle: "idle" };
+function registryAiState(reg) {
+  return (reg && REGISTRY_AI_STATES[reg.status]) || null;
 }
 
 function applyAiState(id, w, state) {
@@ -1116,7 +1116,7 @@ function pollOutput(id) {
     }
   }
 
-  const fromRegistry = registryAiState(claudeRegistryEntry(w), output);
+  const fromRegistry = registryAiState(claudeRegistryEntry(w));
 
   if (output === lastCapture[id]) {
     // Output unchanged — 대기 중인 포트 재시도
