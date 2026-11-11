@@ -139,7 +139,7 @@ function spawnFromTemplate(idx) {
   if (!t) return;
   closeDropdown();
   document.getElementById('spawn-toolbar').style.display = 'none';
-  spawnWorkerRequest({ cwd: t.cwd, cmd: t.cmd, env: t.env || {} });
+  spawnWorkerRequest({ cwd: t.cwd, cmd: t.cmd, env: t.env || {}, prompt: document.getElementById('prompt-input').value.trim() });
 }
 
 function renderDropdown() {

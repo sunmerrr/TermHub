@@ -1358,6 +1358,11 @@ body[data-scoped-worker] .preset-add {
   #spawn-btn { order: 2; }
   #scan-btn { order: 3; }
 
+  #prompt-input {
+    flex-basis: 100%;
+    order: 5;
+  }
+
   .dir-wrap {
     min-width: 0;
     flex-basis: 100%;

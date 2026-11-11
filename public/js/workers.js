@@ -885,7 +885,7 @@ function spawnSession() {
   var base = window._basePath || '/tmp';
   var cwd = raw ? (raw.startsWith('/') ? raw : base + '/' + raw) : base;
   const cmd = document.getElementById('cmd-input').value.trim();
-  spawnWorkerRequest({ cwd, cmd });
+  spawnWorkerRequest({ cwd, cmd, prompt: document.getElementById('prompt-input').value.trim() });
 }
 
 function spawnWorkerRequest(body) {
@@ -899,6 +899,7 @@ function spawnWorkerRequest(body) {
         alert(d.error || 'Invalid path. Worker not created.');
         return;
       }
+      if (body.prompt) document.getElementById('prompt-input').value = '';
       addRecent(body.cwd);
     })
     .catch(() => { pendingSpawnSelect = false; alert('Failed to create worker.'); });

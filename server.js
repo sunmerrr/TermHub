@@ -792,6 +792,23 @@ function sendCommandWhenShellReady(sessionName, cmd, attempt = 0) {
   }, 200);
 }
 
+// 첫 프롬프트는 실행 인자로 넘긴다 — 띄운 뒤 입력창에 보내면 TUI가 뜨기 전에 도착해 일부가 사라질 수 있다.
+// 개행·따옴표가 들어 있어도 한 인자로 넘어가도록 $'...'(zsh·bash) 인용을 쓴다.
+const PROMPT_ARG_COMMANDS = new Set(["claude", "codex"]);
+function supportsInitialPrompt(cmd) {
+  return PROMPT_ARG_COMMANDS.has(path.basename(getBaseCommand(cmd)));
+}
+
+function withInitialPrompt(cmd, prompt) {
+  const quoted = String(prompt)
+    .replace(/\r/g, "")
+    .replace(/\\/g, "\\\\")
+    .replace(/'/g, "\\'")
+    .replace(/\n/g, "\\n")
+    .replace(/[\x00-\x08\x0b-\x1f\x7f]/g, "");
+  return `${cmd} $'${quoted}'`;
+}
+
 // opts.id: 재시작 복원 시 기존 탭 번호를 그대로 쓴다(탭 순서·핀·제목이 id 기준이라 바뀌면 전부 어긋난다)
 function spawnWorker(cwd, cmd, env, opts = {}) {
   const config = loadConfig();
@@ -802,7 +819,8 @@ function spawnWorker(cwd, cmd, env, opts = {}) {
   const cleanEnv = sanitizeEnv(env);
   const envArgs = Object.entries(cleanEnv).flatMap(([key, value]) => ["-e", `${key}=${value}`]);
   tmuxExec(["new-session", "-d", "-s", sessionName, "-c", cwd, "-e", "CLAUDECODE=", ...envArgs]);
-  sendCommandWhenShellReady(sessionName, cmd);
+  // 저장·재개용 cmd에는 프롬프트를 넣지 않는다 — 넣으면 재부팅 후 resume 때 같은 지시를 다시 보낸다
+  sendCommandWhenShellReady(sessionName, opts.prompt ? withInitialPrompt(cmd, opts.prompt) : cmd);
   if (!opts.keepTitle) setSessionTitle(sessionName, "");
   const title = opts.keepTitle ? getSessionTitle(sessionName) : "";
   const logs = [];
@@ -1566,7 +1584,11 @@ const server = http.createServer(async (req, res) => {
     } catch (e) {
       return json(res, 400, { ok: false, error: "Invalid path: does not exist or not accessible." });
     }
-    const id = spawnWorker(resolvedCwd, body.cmd, body.env);
+    const prompt = typeof body.prompt === "string" ? body.prompt.trim().slice(0, 8000) : "";
+    if (prompt && !supportsInitialPrompt(body.cmd || loadConfig().defaultCommand || "claude")) {
+      return json(res, 400, { ok: false, error: "First prompt works only with claude or codex." });
+    }
+    const id = spawnWorker(resolvedCwd, body.cmd, body.env, { prompt });
     return json(res, 200, { ok: true, id });
   }
 
