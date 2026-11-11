@@ -187,7 +187,37 @@ function ensureCard(id, cwd, status, logs, cmd, reason, title, sessionName, star
   }
   if (reason) updateExitReason(id, reason);
   if (status === 'running') updateExitReason(id, null);
+  restoreDraft(id);
   setTimeout(sendResize, 100);
+}
+
+// ── 입력 초안 (기기별) ──
+// 폰 브라우저는 백그라운드에서 페이지를 자주 새로 불러온다 — 쓰던 지시문이 사라지지 않게 워커별로 저장한다.
+// 서버 재시작 뒤 같은 번호가 다른 워커에 다시 쓰일 수 있어 시작 시각까지 키에 넣는다.
+function draftKey(id) {
+  const t = workerTimes[id];
+  return 'draft:' + id + ':' + ((t && t.startedAt) || '');
+}
+
+function saveDraft(id, text) {
+  try {
+    if (text && text.trim()) localStorage.setItem(draftKey(id), text);
+    else localStorage.removeItem(draftKey(id));
+  } catch (e) {
+    console.warn('draft save failed', e);
+  }
+}
+
+function restoreDraft(id) {
+  let text = null;
+  try { text = localStorage.getItem(draftKey(id)); } catch (e) { console.warn('draft load failed', e); }
+  if (!text) return;
+  document.querySelectorAll('#inp-' + id).forEach(inp => {
+    if (inp.value) return;
+    inp.value = text;
+    inp.style.height = 'auto';
+    inp.style.height = Math.min(inp.scrollHeight || 30, 120) + 'px';
+  });
 }
 
 function bindCard(id, root) {
@@ -231,6 +261,7 @@ function bindCard(id, root) {
     inp.addEventListener('input', () => {
       inp.style.height = 'auto';
       inp.style.height = Math.min(inp.scrollHeight, 120) + 'px';
+      saveDraft(id, inp.value);
     });
     inp.addEventListener('paste', e => {
       const files = e.clipboardData && e.clipboardData.files;
@@ -729,6 +760,9 @@ function removeWorker(id) {
 
 function removeWorkerDom(id) {
   clearCustomTitle(id);
+  saveDraft(id, '');
+  delete workerAiState[id];
+  delete workerAiSince[id];
   delete workerTimes[id];
   delete lastSentSizes[id];
   removePreviewTabs(id);
@@ -843,6 +877,7 @@ function appendPathToInput(id, filePath) {
     inp.value = cur + (cur && !/\s$/.test(cur) ? ' ' : '') + filePath + ' ';
     inp.style.height = 'auto';
     inp.style.height = Math.min(inp.scrollHeight, 120) + 'px';
+    saveDraft(id, inp.value);
   });
 }
 
@@ -900,6 +935,7 @@ function sendInput(id) {
   text = text.split('\n').filter(l => l.trim() !== '').join('\n');
   if (!text) return;
   inps.forEach(inp => { inp.value = ''; inp.style.height = 'auto'; });
+  saveDraft(id, '');
   notifyActive(id);
   apiPost('/api/input', { id, text });
 }
