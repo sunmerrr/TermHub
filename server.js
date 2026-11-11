@@ -1169,6 +1169,26 @@ function sendInput(id, text) {
   return true;
 }
 
+// 여러 줄을 한 메시지로 보낸다 — sendInput은 줄마다 Enter를 쳐서 Claude가 줄마다 따로 제출한다.
+// tmux 버퍼에 올려 bracketed paste(-p)로 붙여넣으면 TUI가 한 덩어리 입력으로 받는다.
+function pasteInput(id, text) {
+  const w = workers.get(id);
+  if (!w || w.status !== "running") return false;
+  const buffer = `termhub-paste-${id}`;
+  try {
+    execFileSync("tmux", ["load-buffer", "-b", buffer, "-"], { input: text, stdio: ["pipe", "pipe", "pipe"] });
+    execFileSync("tmux", ["paste-buffer", "-p", "-d", "-b", buffer, "-t", w.sessionName], { stdio: "pipe" });
+  } catch (e) {
+    console.error(`⚠️  Paste to #${id} failed: ${e.message}`);
+    return false;
+  }
+  // 붙여넣기와 Enter를 붙여 보내면 Enter가 붙여넣기 안의 줄바꿈으로 삼켜질 수 있다
+  setTimeout(() => tmuxExec(["send-keys", "-t", w.sessionName, "Enter"]), 400);
+  rememberAction(w, "input", "paste");
+  broadcast({ type: "log", id, src: "stdin", text, ts: Date.now() });
+  return true;
+}
+
 function killWorker(id, reason) {
   const w = workers.get(id);
   if (!w) return false;
@@ -1620,9 +1640,9 @@ const server = http.createServer(async (req, res) => {
   }
 
   if (method === "POST" && url === "/api/input") {
-    const { id, text } = JSON.parse(await readBody(req));
+    const { id, text, mode } = JSON.parse(await readBody(req));
     if (!canAccessWorker(ctx, id)) return json(res, 403, { ok: false, error: "forbidden" });
-    const ok = sendInput(id, text);
+    const ok = mode === "paste" ? pasteInput(id, String(text || "")) : sendInput(id, text);
     return json(res, 200, { ok });
   }
 

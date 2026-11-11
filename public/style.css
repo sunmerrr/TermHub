@@ -1285,6 +1285,81 @@ body[data-scoped-worker] .preset-add {
   white-space: nowrap;
 }
 
+.diff-notes-send {
+  background: #1f6feb;
+  border: none;
+  border-radius: 5px;
+  color: #fff;
+  font-size: 11px;
+  padding: 3px 10px;
+  cursor: pointer;
+  white-space: nowrap;
+}
+
+.diff-notes-send[disabled] {
+  background: #21262d;
+  color: #484f58;
+  cursor: default;
+}
+
+.d2h-code-linenumber.note-target {
+  cursor: pointer;
+}
+
+.d2h-code-linenumber.note-target:hover {
+  box-shadow: inset 3px 0 0 #1f6feb;
+}
+
+.d2h-code-linenumber.has-note {
+  box-shadow: inset 3px 0 0 #d29922;
+}
+
+.diff-note-row td {
+  background: #161b22;
+  padding: 6px 10px;
+}
+
+.diff-note-editor textarea {
+  width: 100%;
+  background: #0d1117;
+  border: 1px solid #30363d;
+  border-radius: 5px;
+  color: #e6edf3;
+  font-size: 12px;
+  padding: 6px 8px;
+  resize: vertical;
+  font-family: -apple-system, sans-serif;
+}
+
+.diff-note-actions {
+  display: flex;
+  gap: 6px;
+  margin-top: 6px;
+}
+
+.diff-note-actions button {
+  background: #21262d;
+  border: 1px solid #30363d;
+  border-radius: 5px;
+  color: #e6edf3;
+  font-size: 11px;
+  padding: 3px 10px;
+  cursor: pointer;
+}
+
+.diff-note-actions .diff-note-save {
+  background: #238636;
+  border-color: #238636;
+}
+
+.diff-note-saved {
+  color: #f2cc60;
+  font-size: 12px;
+  white-space: pre-wrap;
+  cursor: pointer;
+  font-family: -apple-system, sans-serif;
+}
+
 .diff-refresh-btn,
 .diff-close-btn {
   background: #21262d;

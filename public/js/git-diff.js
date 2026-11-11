@@ -3,6 +3,8 @@
 
 // workerId → { open: boolean, selectedFile: string|null }
 const diffPanels = new Map();
+// workerId → [{ file, line, side, code, text }] — 아직 워커에 보내지 않은 리뷰 메모
+const diffNotes = new Map();
 
 function openGitDiff(workerId) {
   workerId = String(workerId);
@@ -36,6 +38,7 @@ function openGitDiff(workerId) {
     '<div class="diff-toolbar">' +
       '<button class="diff-refresh-btn" title="새로고침">↺</button>' +
       '<span class="diff-stat"></span>' +
+      '<button class="diff-notes-send" title="줄 번호를 눌러 단 메모를 이 워커에게 한 번에 보냅니다" disabled>메모 보내기</button>' +
       '<button class="diff-close-btn" title="닫기">✕</button>' +
     '</div>' +
     '<div class="diff-body">' +
@@ -57,6 +60,10 @@ function openGitDiff(workerId) {
     refreshGitDiff(workerId);
   });
 
+  container.querySelector('.diff-notes-send').addEventListener('click', function() {
+    sendDiffNotes(workerId);
+  });
+
   // 사이드바 토글
   var sidebar = container.querySelector('.diff-file-sidebar');
   var toggleBtn = container.querySelector('.diff-sidebar-toggle');
@@ -75,6 +82,7 @@ function openGitDiff(workerId) {
   }
 
   diffPanels.set(workerId, { open: true, selectedFile: null });
+  updateNotesButton(workerId);
 
   // 파일 목록 자동 로드
   loadFileList(workerId);
@@ -178,6 +186,7 @@ function loadFileDiff(workerId, filePath) {
       });
       ui.draw();
       ui.highlightCode();
+      bindDiffNotes(workerId, filePath, diffContent);
     })
     .catch(function(err) {
       diffContent.innerHTML = '<div class="diff-placeholder" style="color:#f85149">로드 실패: ' + err.message + '</div>';
@@ -222,4 +231,159 @@ function refreshGitDiff(workerId) {
     // 파일 목록 로드 후 선택 파일 diff도 갱신
     setTimeout(function() { loadFileDiff(workerId, selectedFile); }, 300);
   }
+}
+
+// ── 리뷰 메모 ──
+// diff 줄 번호를 누르면 그 줄 아래에 메모 입력칸이 열린다. 모은 메모는 "메모 보내기"로 한 메시지에 묶어 워커에 붙여넣는다.
+
+function notesFor(workerId) {
+  if (!diffNotes.has(workerId)) diffNotes.set(workerId, []);
+  return diffNotes.get(workerId);
+}
+
+// diff2html line-by-line 행: 첫 칸에 이전/새 줄 번호(line-num1/2), 둘째 칸에 코드
+function diffRowInfo(tr) {
+  var numCell = tr.querySelector('.d2h-code-linenumber');
+  var codeEl = tr.querySelector('.d2h-code-line-ctn');
+  if (!numCell || !codeEl) return null;
+  var newNum = (numCell.querySelector('.line-num2') || {}).textContent || '';
+  var oldNum = (numCell.querySelector('.line-num1') || {}).textContent || '';
+  newNum = newNum.trim();
+  oldNum = oldNum.trim();
+  if (!newNum && !oldNum) return null;
+  return {
+    numCell: numCell,
+    line: newNum || oldNum,
+    // 삭제된 줄은 새 파일에 없으므로 이전 줄 번호임을 표시한다
+    side: newNum ? 'new' : 'old',
+    code: codeEl.textContent.replace(/\s+$/, '')
+  };
+}
+
+function bindDiffNotes(workerId, filePath, diffContent) {
+  diffContent.querySelectorAll('.d2h-diff-tbody tr').forEach(function(tr) {
+    var info = diffRowInfo(tr);
+    if (!info) return;
+    info.numCell.classList.add('note-target');
+    info.numCell.title = '메모 달기';
+    info.numCell.addEventListener('click', function() {
+      openNoteEditor(workerId, filePath, tr, info);
+    });
+  });
+  renderNoteRows(workerId, filePath, diffContent);
+}
+
+function noteKey(n) {
+  return n.file + ':' + n.side + ':' + n.line;
+}
+
+function openNoteEditor(workerId, filePath, tr, info) {
+  var next = tr.nextElementSibling;
+  if (next && next.classList.contains('diff-note-row')) {
+    var existing = next.querySelector('textarea');
+    if (existing) { existing.focus(); return; }
+  }
+  var current = notesFor(workerId).find(function(n) { return noteKey(n) === noteKey({ file: filePath, side: info.side, line: info.line }); });
+  var row = document.createElement('tr');
+  row.className = 'diff-note-row editing';
+  row.innerHTML = '<td colspan="2"><div class="diff-note-editor">' +
+    '<textarea rows="2" placeholder="이 줄에 대한 수정 요청이나 질문"></textarea>' +
+    '<div class="diff-note-actions"><button class="diff-note-save">저장</button><button class="diff-note-cancel">취소</button></div>' +
+    '</div></td>';
+  var ta = row.querySelector('textarea');
+  ta.value = current ? current.text : '';
+  var close = function() {
+    row.remove();
+    renderNoteRows(workerId, filePath, tr.closest('.diff-content'));
+  };
+  var save = function() {
+    var text = ta.value.trim();
+    var list = notesFor(workerId).filter(function(n) { return noteKey(n) !== noteKey({ file: filePath, side: info.side, line: info.line }); });
+    if (text) list.push({ file: filePath, line: info.line, side: info.side, code: info.code, text: text });
+    diffNotes.set(workerId, list);
+    updateNotesButton(workerId);
+    close();
+  };
+  row.querySelector('.diff-note-save').addEventListener('click', save);
+  row.querySelector('.diff-note-cancel').addEventListener('click', close);
+  ta.addEventListener('keydown', function(e) {
+    // 터미널 단축키 처리(app.js)로 새지 않게 막는다
+    e.stopPropagation();
+    if (e.key === 'Enter' && (e.metaKey || e.ctrlKey)) { e.preventDefault(); save(); }
+    if (e.key === 'Escape') { e.preventDefault(); close(); }
+  });
+  tr.parentNode.insertBefore(row, tr.nextSibling);
+  ta.focus();
+}
+
+// 저장된 메모를 해당 줄 아래에 표시한다 (diff를 다시 그리면 행이 새로 만들어지므로 매번 다시 붙인다)
+function renderNoteRows(workerId, filePath, diffContent) {
+  if (!diffContent) return;
+  diffContent.querySelectorAll('.diff-note-row:not(.editing)').forEach(function(r) { r.remove(); });
+  var byKey = {};
+  notesFor(workerId).forEach(function(n) { if (n.file === filePath) byKey[noteKey(n)] = n; });
+  diffContent.querySelectorAll('.d2h-diff-tbody tr').forEach(function(tr) {
+    if (tr.classList.contains('diff-note-row')) return;
+    var info = diffRowInfo(tr);
+    if (!info) return;
+    var note = byKey[noteKey({ file: filePath, side: info.side, line: info.line })];
+    info.numCell.classList.toggle('has-note', !!note);
+    if (!note) return;
+    var row = document.createElement('tr');
+    row.className = 'diff-note-row';
+    var cell = document.createElement('td');
+    cell.colSpan = 2;
+    var box = document.createElement('div');
+    box.className = 'diff-note-saved';
+    box.textContent = '💬 ' + note.text;
+    box.title = '눌러서 고치기';
+    box.addEventListener('click', function() {
+      row.remove();
+      openNoteEditor(workerId, filePath, tr, info);
+    });
+    cell.appendChild(box);
+    row.appendChild(cell);
+    tr.parentNode.insertBefore(row, tr.nextSibling);
+  });
+}
+
+function updateNotesButton(workerId) {
+  var container = document.querySelector('.split-diff[data-worker-id="' + workerId + '"]');
+  if (!container) return;
+  var btn = container.querySelector('.diff-notes-send');
+  var count = notesFor(workerId).length;
+  btn.disabled = count === 0;
+  btn.textContent = count ? '메모 보내기 (' + count + ')' : '메모 보내기';
+}
+
+function formatDiffNotes(notes) {
+  var lines = ['코드 리뷰 메모입니다. 각 위치를 확인하고 반영해 주세요.', ''];
+  notes.forEach(function(n, i) {
+    var where = n.file + ':' + n.line + (n.side === 'old' ? ' (삭제된 줄, 이전 줄 번호)' : '');
+    lines.push((i + 1) + '. ' + where);
+    if (n.code.trim()) lines.push('   코드: ' + n.code.trim().slice(0, 200));
+    lines.push('   메모: ' + n.text.replace(/\n/g, '\n         '));
+  });
+  return lines.join('\n');
+}
+
+function sendDiffNotes(workerId) {
+  var notes = notesFor(workerId);
+  if (!notes.length) return;
+  var container = document.querySelector('.split-diff[data-worker-id="' + workerId + '"]');
+  var btn = container && container.querySelector('.diff-notes-send');
+  if (btn) btn.disabled = true;
+  notifyActive(workerId);
+  apiPost('/api/input', { id: workerId, text: formatDiffNotes(notes), mode: 'paste' })
+    .then(function(r) { return r.json().catch(function() { return {}; }); })
+    .then(function(d) {
+      if (!d.ok) throw new Error('워커가 실행 중이 아닙니다');
+      diffNotes.set(workerId, []);
+      updateNotesButton(workerId);
+      if (container) renderNoteRows(workerId, (diffPanels.get(workerId) || {}).selectedFile, container.querySelector('.diff-content'));
+    })
+    .catch(function(err) {
+      alert('메모 전송 실패: ' + err.message);
+      updateNotesButton(workerId);
+    });
 }
