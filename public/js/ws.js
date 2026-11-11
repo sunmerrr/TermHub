@@ -45,8 +45,22 @@ function scheduleReconnect(delay) {
 
 // 폰을 잠갔다 켜면 소켓이 죽어 있는 경우가 많다 — 화면이 돌아오면 바로 재연결
 document.addEventListener('visibilitychange', () => {
+  // 화면을 내리면 아무 워커도 안 보고 있다고 알린다 — 서버가 그 사이 알림을 보내고 스냅샷 전송도 멈춘다
+  sendView(true);
   if (document.visibilityState !== 'visible' || !ws) return;
   if (ws.readyState === WebSocket.CLOSED || ws.readyState === WebSocket.CLOSING) scheduleReconnect(0);
+});
+
+// 사용자가 이 기기에서 실제로 조작 중인지 서버에 알린다 — 보고 있는 워커의 알림은 보내지 않는다
+let lastPresenceSent = 0;
+function sendPresence() {
+  const now = Date.now();
+  if (!ws || ws.readyState !== 1 || now - lastPresenceSent < 20000) return;
+  lastPresenceSent = now;
+  ws.send(JSON.stringify({ type: 'presence' }));
+}
+['pointerdown', 'keydown', 'wheel', 'touchstart', 'focus'].forEach(type => {
+  window.addEventListener(type, sendPresence, { passive: true, capture: true });
 });
 
 // 서버에 "지금 보고 있는 워커"를 알린다 — 스냅샷은 보고 있는 워커 것만 받는다
@@ -55,7 +69,8 @@ function sendView(force) {
   if (!ws || ws.readyState !== 1) return;
   let ids;
   const scoped = scopedWorkerId();
-  if (scoped) ids = [String(scoped)];
+  if (document.visibilityState !== 'visible') ids = [];
+  else if (scoped) ids = [String(scoped)];
   else if (typeof layout !== 'undefined' && layout === 'split') ids = Array.from(document.querySelectorAll('#tab-bar .tab')).map(t => t.dataset.id).filter(id => /^\d+$/.test(id));
   else ids = activeTab && /^\d+$/.test(String(activeTab)) ? [String(activeTab)] : [];
   const key = ids.join(',');
@@ -72,7 +87,8 @@ function handleMsg(d) {
   if (d.type === 'status') updateStatus(d.id, d.status, d.reason || null);
   if (d.type === 'title') updateTitle(d.id, d.title || '');
   if (d.type === 'cwd') updateCwd(d.id, d.cwd);
-  if (d.type === 'aiState') updateAIState(d.id, d.state);
+  if (d.type === 'aiState') updateAIState(d.id, d.state, d.since);
+  if (d.type === 'task') updateTask(d.id, d.task);
   if (d.type === 'preview_detected') ensurePreview(d.workerId, d.port);
   if (d.type === 'preview_prompt') showPreviewPrompt(d.workerId, d.port, d.contentType);
   if (d.type === 'preview_tunnel') updatePreviewTunnel(d.port, d.url);
@@ -204,7 +220,8 @@ function loadAll() {
       });
       list.forEach(w => {
         ensureCard(w.id, w.cwd, w.status, w.logs, w.cmd, w.exitReason || null, w.title || '', w.sessionName || '', w.startedAt || null, w.lastOutputAt || null, w.claudeName || '');
-        if (w.aiState) updateAIState(w.id, w.aiState);
+        if (w.aiState) updateAIState(w.id, w.aiState, w.aiStateAt);
+        updateTask(w.id, w.task || '');
         if (w.claudeName) updateClaudeName(w.id, w.claudeName);
       });
     });

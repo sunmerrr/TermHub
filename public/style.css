@@ -430,6 +430,26 @@ header h1 {
   padding: 3px 12px;
   flex-shrink: 0;
   border-bottom: 1px solid #21262d;
+  display: flex;
+  gap: 10px;
+  min-width: 0;
+}
+
+.cwd-path {
+  flex-shrink: 0;
+  max-width: 50%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.card-task {
+  margin-left: auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: #c9d1d9;
 }
 
 .exit-reason {

@@ -185,20 +185,35 @@ function readClaudeSessionRegistry() {
     const tmuxSession = info.tmux.split(":")[0];
     const prev = byTmuxSession.get(tmuxSession);
     if (!prev || (info.startedAt || 0) > prev.startedAt) {
-      byTmuxSession.set(tmuxSession, { sessionId: info.sessionId, name: info.name || null, startedAt: info.startedAt || 0 });
+      byTmuxSession.set(tmuxSession, {
+        sessionId: info.sessionId,
+        name: info.name || null,
+        startedAt: info.startedAt || 0,
+        status: typeof info.status === "string" ? info.status : null,
+      });
     }
   }
   return byTmuxSession;
 }
 
+// 워커마다 매초 레지스트리를 읽으면 파일 수 × 워커 수만큼 읽게 되므로 1초 동안은 같은 결과를 나눠 쓴다
+let claudeRegistryCache = { at: 0, map: new Map() };
+function claudeRegistryEntry(w) {
+  if (Date.now() - claudeRegistryCache.at > 900) {
+    claudeRegistryCache = { at: Date.now(), map: readClaudeSessionRegistry() };
+  }
+  const found = claudeRegistryCache.map.get(w.sessionName);
+  if (!found) return null;
+  // 재부팅 전 파일의 pid가 다른 프로세스에 재사용됐을 수 있다 — 워커(tmux 세션)보다 먼저 시작된 기록은 믿지 않는다
+  if (found.startedAt && w.startedAt && found.startedAt < w.startedAt - 60000) return null;
+  return found;
+}
+
 function syncClaudeSessions() {
-  const registry = readClaudeSessionRegistry();
   for (const [id, w] of workers) {
     if (w.status !== "running") continue;
-    const found = registry.get(w.sessionName);
+    const found = claudeRegistryEntry(w);
     if (!found) continue;
-    // 재부팅 전 파일의 pid가 다른 프로세스에 재사용됐을 수 있다 — 워커(tmux 세션)보다 먼저 시작된 기록은 믿지 않는다
-    if (found.startedAt && w.startedAt && found.startedAt < w.startedAt - 60000) continue;
     if (found.sessionId === w.claudeSessionId && found.name === w.claudeName) continue;
     w.claudeSessionId = found.sessionId;
     w.claudeName = found.name;
@@ -865,7 +880,11 @@ try {
 const PUSH_CONTACT = process.env.PUSH_CONTACT || "mailto:admin@localhost";
 const PUSH_COOLDOWN_MS = Number(process.env.PUSH_COOLDOWN_MS || 60000);
 const PUSH_MAX_SUBSCRIPTIONS = 20;
-const pushAlertTime = new Map(); // workerId → timestamp
+const pushAlertTime = new Map(); // "workerId:kind" → timestamp (대기·완료 쿨다운을 따로 둬 완료 직후의 대기 알림이 묻히지 않게)
+// 이보다 짧게 일한 뒤 멈춘 건 알리지 않는다 — 짧은 답변마다 폰이 울리지 않도록
+const DONE_PUSH_MIN_MS = Number(process.env.DONE_PUSH_MIN_MS || 20000);
+// 그 워커를 띄워 둔 기기에서 이 시간 안에 조작이 있었으면 사용자가 보고 있다고 보고 알리지 않는다
+const PRESENCE_WINDOW_MS = 120000;
 
 function initPush() {
   if (!webpush) return;
@@ -919,19 +938,43 @@ function waitingQuestion(w) {
   return (question || "입력/승인이 필요합니다.").slice(0, 120);
 }
 
-function sendWaitingPush(id) {
-  const w = workers.get(id);
-  if (!w || !webpush) return;
+function isWatched(id) {
+  if (!wss) return false;
   const now = Date.now();
-  if (now - (pushAlertTime.get(id) || 0) < PUSH_COOLDOWN_MS) return;
-  pushAlertTime.set(id, now);
+  for (const c of wss.clients) {
+    if (c.readyState !== 1 || !c.viewing || !c.viewing.has(String(id))) continue;
+    if (c.lastPresence && now - c.lastPresence < PRESENCE_WINDOW_MS) return true;
+  }
+  return false;
+}
+
+function workerPush(id, kind, suffix, body) {
+  const w = workers.get(id);
+  if (!w || !webpush || isWatched(id)) return;
+  const key = `${id}:${kind}`;
+  const now = Date.now();
+  if (now - (pushAlertTime.get(key) || 0) < PUSH_COOLDOWN_MS) return;
+  pushAlertTime.set(key, now);
   const label = w.title || w.claudeName || `${w.cmd || "claude"} · ${path.basename(w.cwd || "")}`;
   sendPushToAll({
-    title: `#${id} ${label} — 대기 중`,
-    body: waitingQuestion(w),
+    title: `#${id} ${label} — ${suffix}`,
+    body,
+    // 같은 워커의 알림은 tag가 같아 이전 것을 대체한다
     tag: `worker-${id}`,
     data: { workerId: id, url: `/?focus=${encodeURIComponent(id)}` },
   });
+}
+
+function sendWaitingPush(id) {
+  const w = workers.get(id);
+  if (!w) return;
+  workerPush(id, "waiting", "대기 중", waitingQuestion(w));
+}
+
+function sendDonePush(id) {
+  const w = workers.get(id);
+  if (!w) return;
+  workerPush(id, "done", "완료", w.task || "작업이 끝났습니다.");
 }
 
 function sendWaitingAlert(id) {
@@ -956,6 +999,34 @@ function sendWaitingAlert(id) {
 
 const IDLE_THRESHOLD = 5000; // 5 seconds of no output change → idle
 
+// Claude Code는 pane 제목을 "<상태 글리프> <작업 요약>"으로 바꾼다(예: "✳ 시리즈 업데이트 확인").
+// 글리프는 실제 상태와 어긋나는 경우가 있어(busy인데 ✳) 상태 판정에는 쓰지 않고 요약 문구만 표시용으로 쓴다.
+function claudeTaskFromTitle(title) {
+  const text = String(title || "").replace(/^[\u2800-\u28FF✳✻✽✶✢·*]+\s*/u, "").trim();
+  // Claude가 제목을 바꾸기 전에는 셸이 쓴 실행 명령("claude --resume …")이 남아 있다
+  if (!text || text === "Claude Code" || /^(claude|codex)(\s|$)/.test(text)) return "";
+  return text.slice(0, 120);
+}
+
+// 레지스트리의 busy/idle은 Claude가 직접 기록하므로 화면 변화로 추측하는 것보다 정확하다.
+// 다만 권한 확인 메뉴가 떠 있을 때 무슨 값이 되는지 확인되지 않아 대기 판정은 화면 패턴을 먼저 본다.
+function registryAiState(reg, output) {
+  if (!reg || (reg.status !== "busy" && reg.status !== "idle")) return null;
+  if (detectWaiting(output)) return "waiting";
+  return reg.status === "busy" ? "working" : "idle";
+}
+
+function applyAiState(id, w, state) {
+  if (!state || state === w.aiState) return;
+  const prev = w.aiState;
+  const workedMs = prev === "working" && w.aiStateAt ? Date.now() - w.aiStateAt : 0;
+  w.aiState = state;
+  w.aiStateAt = Date.now();
+  broadcast({ type: "aiState", id, state, since: w.aiStateAt });
+  if (state === "waiting") sendWaitingAlert(id);
+  else if (state === "idle" && workedMs >= DONE_PUSH_MIN_MS) sendDonePush(id);
+}
+
 let lastCapture = {};
 
 function pollOutput(id) {
@@ -971,11 +1042,12 @@ function pollOutput(id) {
     broadcast({ type: "status", id, status: "completed", reason: w.exitReason });
     return;
   }
-  // 경로·명령·alternate screen 여부를 한 번에 조회 (경로에 '|'가 있을 수 있어 경로를 맨 뒤에 둔다)
-  const [altFlag, currentPaneCmd, ...pathParts] = tmux(
-    `display-message -t ${w.sessionName} -p "#{alternate_on}|#{pane_current_command}|#{pane_current_path}"`
-  ).trim().split("|");
-  const currentCwd = pathParts.join("|");
+  // 경로·명령·제목·alternate screen 여부를 한 번에 조회. 제목과 경로에는 '|'가 들어갈 수 있어 구분자로 US(0x1f)를 쓴다.
+  // launchd 환경엔 UTF-8 로캘이 없어 tmux가 한글·제어 문자를 '_'로 바꾼다 — -u로 UTF-8 출력을 강제한다
+  const [altFlag, currentPaneCmd, paneTitle = "", currentCwd = ""] = tmuxExec([
+    "-u", "display-message", "-t", w.sessionName, "-p",
+    "#{alternate_on}\x1f#{pane_current_command}\x1f#{pane_title}\x1f#{pane_current_path}",
+  ]).replace(/\n$/, "").split("\x1f");
   w.alternateScreen = altFlag === "1";
   const cols = w.cols || 80;
   const rows = terminalRowsForWorker(w);
@@ -996,6 +1068,12 @@ function pollOutput(id) {
   if (w.sizeChangedAt && Date.now() - w.sizeChangedAt < RESIZE_SETTLE_MS && lastCapture[id] !== undefined) {
     const before = countNonBlankLines(lastCapture[id]);
     if (before >= 10 && countNonBlankLines(output) < before / 2) return;
+  }
+
+  const task = w.claudeSessionId ? claudeTaskFromTitle(paneTitle) : "";
+  if (task !== (w.task || "")) {
+    w.task = task;
+    broadcast({ type: "task", id, task });
   }
 
   // Track actual working directory
@@ -1020,21 +1098,16 @@ function pollOutput(id) {
     }
   }
 
+  const fromRegistry = registryAiState(claudeRegistryEntry(w), output);
+
   if (output === lastCapture[id]) {
     // Output unchanged — 대기 중인 포트 재시도
     detectPorts(id, output);
-    // check if idle threshold reached
-    if (w.aiState !== 'idle' && w.aiState !== 'waiting' && w.lastChangeTime) {
-      const elapsed = Date.now() - w.lastChangeTime;
-      if (elapsed >= IDLE_THRESHOLD) {
-        const waiting = detectWaiting(output);
-        const newState = waiting ? 'waiting' : 'idle';
-        if (newState !== w.aiState) {
-          w.aiState = newState;
-          broadcast({ type: "aiState", id, state: newState });
-          if (newState === 'waiting') sendWaitingAlert(id);
-        }
-      }
+    if (fromRegistry) {
+      applyAiState(id, w, fromRegistry);
+    } else if (w.aiState !== 'idle' && w.aiState !== 'waiting' && w.lastChangeTime) {
+      // 레지스트리가 없는 명령(codex 등)은 출력이 멈춘 시간으로 추측한다
+      if (Date.now() - w.lastChangeTime >= IDLE_THRESHOLD) applyAiState(id, w, detectWaiting(output) ? 'waiting' : 'idle');
     }
     return;
   }
@@ -1047,13 +1120,7 @@ function pollOutput(id) {
   broadcastSnapshot(id, lines);
 
   // Output just changed — check for waiting, otherwise working
-  const waiting = detectWaiting(output);
-  const aiState = waiting ? 'waiting' : 'working';
-  if (aiState !== w.aiState) {
-    w.aiState = aiState;
-    broadcast({ type: "aiState", id, state: aiState });
-    if (aiState === 'waiting') sendWaitingAlert(id);
-  }
+  applyAiState(id, w, fromRegistry || (detectWaiting(output) ? 'waiting' : 'working'));
 }
 
 function sendInput(id, text) {
@@ -1286,6 +1353,8 @@ function workerSummary(id, w) {
     claudeName: w.claudeName || null,
     logs: w.logs,
     aiState: w.aiState || null,
+    aiStateAt: w.aiStateAt || null,
+    task: w.task || "",
     exitReason: w.exitReason || null,
     startedAt: w.startedAt || null,
     lastOutputAt: w.lastChangeTime || null
@@ -1321,7 +1390,7 @@ function canReceiveMessage(ctx, obj) {
   if (obj.type === "preview_tunnel") {
     return detectedPorts.get(workerId)?.has(Number(obj.port)) || false;
   }
-  return ["spawned", "log", "status", "cwd", "aiState", "snapshot", "title", "presets", "preview_detected", "preview_prompt", "preview_closed"].includes(obj.type);
+  return ["spawned", "log", "status", "cwd", "aiState", "task", "snapshot", "title", "presets", "preview_detected", "preview_prompt", "preview_closed"].includes(obj.type);
 }
 
 function canAccessWorker(ctx, workerId) {
@@ -1573,6 +1642,8 @@ const server = http.createServer(async (req, res) => {
       forgetPersistedWorker(id);
       // 워커 관련 alert 쿨다운 키 정리 (issueAlertTime 무한 누적 방지)
       issueAlertTime.delete(`worker-waiting-${id}`);
+      pushAlertTime.delete(`${id}:waiting`);
+      pushAlertTime.delete(`${id}:done`);
       workers.delete(id);
     }
     return json(res, 200, { ok: true });
@@ -1800,6 +1871,7 @@ wss.on('connection', (ws, req) => {
   }
   ws.authContext = ctx;
   ws.isAliveSocket = true;
+  ws.lastPresence = Date.now();
   ws.on('pong', () => { ws.isAliveSocket = true; });
   if (ctx.kind === "worker") {
     workerResizeOwners.set(String(ctx.workerId), ws);
@@ -1808,7 +1880,12 @@ wss.on('connection', (ws, req) => {
   ws.on('message', raw => {
     try {
       const msg = JSON.parse(raw);
+      if (msg.type === 'presence') {
+        ws.lastPresence = Date.now();
+        return;
+      }
       if (msg.type === 'view') {
+        ws.lastPresence = Date.now();
         const ids = Array.isArray(msg.ids) ? msg.ids.map(String).filter(id => canAccessWorker(ctx, id)) : [];
         const previous = ws.viewing || new Set();
         ws.viewing = new Set(ids);

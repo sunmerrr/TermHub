@@ -79,7 +79,7 @@ function ensureCard(id, cwd, status, logs, cmd, reason, title, sessionName, star
       '<span class="badge' + (status === 'stopped' ? ' stopped' : '') + (status === 'completed' ? ' completed' : '') + '" id="badge-' + id + '">' + status + '</span>' +
       cardActionButtonsHtml(id, status) +
     '</div>' +
-    '<div class="card-cwd">' + displayPath(cwd) + '</div>' +
+    '<div class="card-cwd"><span class="cwd-path">' + displayPath(cwd) + '</span><span class="card-task" id="task-' + id + '"></span></div>' +
     '<div class="exit-reason" id="exit-reason-' + id + '"></div>' +
     '<div class="logs-wrap">' +
       '<div class="logs" id="logs-' + id + '"></div>' +
@@ -725,16 +725,22 @@ function removeWorkerDom(id) {
 }
 
 function updateCwd(id, cwd) {
-  document.querySelectorAll('#card-' + id + ' .card-cwd').forEach(el => {
-    el.textContent = displayPath(cwd);
-  });
-  // Also update card inside tab-panel
-  document.querySelectorAll('.tab-panel[data-id="' + id + '"] .card-cwd').forEach(el => {
+  document.querySelectorAll('#card-' + id + ' .cwd-path').forEach(el => {
     el.textContent = displayPath(cwd);
   });
   const tab = document.querySelector('.tab[data-id="' + id + '"]');
   if (tab) tab.dataset.cwd = cwd;
   renderTitle(id, cwd);
+}
+
+// Claude가 pane 제목에 쓰는 작업 요약 — 카드 경로 줄 오른쪽과 탭 툴팁에 보여준다
+function updateTask(id, task) {
+  document.querySelectorAll('#task-' + id).forEach(el => {
+    el.textContent = task || '';
+    el.title = task || '';
+  });
+  const tab = document.querySelector('.tab[data-id="' + id + '"]');
+  if (tab) tab.title = task || '';
 }
 
 function updateClaudeName(id, claudeName) {

@@ -21,7 +21,7 @@ function setPushButtonState(state) {
   btn.classList.toggle('layout-active', state === 'on');
   btn.title = state === 'on' ? '푸시 알림 켜짐 — 누르면 끔'
     : state === 'denied' ? '브라우저에서 알림이 차단됨'
-    : '대기 알림을 이 기기로 받기';
+    : '대기·완료 알림을 이 기기로 받기';
   btn.textContent = state === 'on' ? '🔔' : '🔕';
 }
 
