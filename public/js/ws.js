@@ -233,6 +233,7 @@ function loadConfig() {
       if (!cfg) return;
       if (cfg.scopedWorkerId && typeof applyScopedMode === 'function') applyScopedMode(cfg.scopedWorkerId);
       if (cfg.basePath) window._basePath = cfg.basePath;
+      if (Number(cfg.promptCacheTtlMinutes) > 0) window._cacheTtlMin = Number(cfg.promptCacheTtlMinutes);
       if (cfg.favorites && !localStorage.getItem('fav')) {
         favorites = cfg.favorites;
         saveFavs();

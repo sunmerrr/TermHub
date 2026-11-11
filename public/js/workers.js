@@ -662,8 +662,36 @@ function updateChoices(id) {
   });
 }
 
-function updateAIState(id, state) {
+// ── 프롬프트 캐시 만료 카운트다운 ──
+// Claude는 마지막 응답 후 캐시 TTL(기본 5분) 안에 다음 요청이 오면 캐시를 재사용한다 — 그 안에 답하면 비용·지연이 준다.
+// 마지막 응답 시각은 서버가 상태를 idle/waiting으로 바꾼 시각(since)으로 본다. TTL은 config.json promptCacheTtlMinutes.
+const workerAiSince = {};
+
+function cacheBadgeText(id, state) {
+  const tab = document.querySelector('.tab[data-id="' + id + '"]');
+  const since = workerAiSince[id];
+  if (!tab || !tab.dataset.claudeName || !since) return state;
+  const left = (window._cacheTtlMin || 5) * 60000 - (Date.now() - since);
+  if (left <= 0) return state + ' · cache ✕';
+  const sec = Math.ceil(left / 1000);
+  return state + ' · cache ' + Math.floor(sec / 60) + ':' + String(sec % 60).padStart(2, '0');
+}
+
+function renderCacheTimer(id) {
+  const state = workerAiState[id];
+  if (state !== 'idle' && state !== 'waiting') return;
+  document.querySelectorAll('#badge-' + id).forEach(el => {
+    if (el.classList.contains('stopped') || el.classList.contains('completed')) return;
+    el.textContent = cacheBadgeText(id, state);
+    el.title = '프롬프트 캐시가 살아 있는 동안 답하면 비용·지연이 줄어듭니다';
+  });
+}
+
+setInterval(() => Object.keys(workerAiState).forEach(renderCacheTimer), 1000);
+
+function updateAIState(id, state, since) {
   workerAiState[id] = state;
+  workerAiSince[id] = since || Date.now();
   updateChoices(id);
   // Skip if worker is stopped/completed
   var badge = document.querySelector('#badge-' + id);
@@ -682,12 +710,13 @@ function updateAIState(id, state) {
     el.classList.remove('ai-idle', 'ai-waiting');
     if (state === 'idle') {
       el.classList.add('ai-idle');
-      el.textContent = 'idle';
+      el.textContent = cacheBadgeText(id, 'idle');
     } else if (state === 'waiting') {
       el.classList.add('ai-waiting');
-      el.textContent = 'waiting';
+      el.textContent = cacheBadgeText(id, 'waiting');
     } else {
       el.textContent = 'running';
+      el.title = '';
     }
   });
   refreshTabPriority();

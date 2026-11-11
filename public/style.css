@@ -462,6 +462,8 @@ header h1 {
 }
 
 .badge {
+  white-space: nowrap;
+  font-variant-numeric: tabular-nums;
   font-size: 11px;
   padding: 2px 7px;
   border-radius: 10px;
