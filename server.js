@@ -144,6 +144,17 @@ function setSessionTitle(sessionName, title) {
 }
 
 // ── 워커 영속화 — 재부팅으로 tmux가 통째로 사라져도 어떤 폴더에서 어떤 Claude 세션이 돌고 있었는지 남긴다 ──
+// tmux 서버 식별자(pid:시작 시각). 저장해 두면 재시작 때 "tmux 서버는 그대로인데 세션만 없어졌다"(사용자가 끈 것)와
+// "재부팅·tmux 재시작으로 전부 사라졌다"를 구분할 수 있다
+const TMUX_SERVER_ID_TTL_MS = 60000;
+let tmuxServerIdCache = { id: null, at: 0 };
+function tmuxServerId() {
+  if (Date.now() - tmuxServerIdCache.at > TMUX_SERVER_ID_TTL_MS) {
+    tmuxServerIdCache = { id: tmuxExec(["display-message", "-p", "#{pid}:#{start_time}"]).trim() || null, at: Date.now() };
+  }
+  return tmuxServerIdCache.id;
+}
+
 function persistWorker(id) {
   const w = workers.get(String(id));
   if (!w) return;
@@ -158,6 +169,7 @@ function persistWorker(id) {
     claudeName: w.claudeName || null,
     status: w.status,
     startedAt: w.startedAt || null,
+    tmuxServer: tmuxServerId(),
   };
   saveState(state);
 }
@@ -2467,6 +2479,13 @@ function restorePersistedWorkers() {
       continue;
     }
     if (s.status !== "running") { forgetPersistedWorker(id); continue; }
+    // tmux 서버가 그대로인데 이 세션만 없다면 서버가 꺼져 있는 동안 사용자가 끄거나 명령이 끝난 것이다 — 되살리지 않는다.
+    // (예전 상태 파일처럼 식별자가 없으면 판단할 수 없어 기존대로 되살린다)
+    if (s.tmuxServer && s.tmuxServer === tmuxServerId()) {
+      console.log(`♻️  #${id}: session ended while TermHub was down, not resuming`);
+      forgetPersistedWorker(id);
+      continue;
+    }
     let blocked = null;
     if (!s.claudeSessionId) blocked = "Server restarted and there was no Claude session to resume.";
     else if (!s.cwd || !fs.existsSync(s.cwd)) blocked = `Server restarted but the folder no longer exists: ${s.cwd}`;
