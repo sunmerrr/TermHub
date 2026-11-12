@@ -773,9 +773,10 @@ header h1 {
 
 .key-grid {
   display: grid;
-  grid-template-columns: repeat(3, 1fr);
+  grid-template-columns: repeat(4, 1fr);
   gap: 4px;
-  width: 200px;
+  width: 248px;
+  margin-bottom: 6px;
 }
 
 .tk-label-row {
@@ -854,6 +855,32 @@ header h1 {
 .card.dropping {
   outline: 2px dashed #1f6feb;
   outline-offset: -2px;
+}
+
+/* 폰의 입력 줄 안에서도 키 버튼·⌨ 토글이 파란 Send 스타일(.input-row button)을 받지 않게 한다 */
+.input-row .key-btn {
+  background: #161b22;
+  border: 1px solid #30363d;
+  border-bottom: 2px solid #21262d;
+  border-radius: 4px;
+  color: #8b949e;
+  font-size: 11px;
+}
+
+.input-row .key-btn:hover {
+  background: #21262d;
+  color: #e6edf3;
+}
+
+.input-row .toolkit-toggle {
+  background: #21262d;
+  border: 1px solid #30363d;
+  color: #8b949e;
+}
+
+.input-row .toolkit-toggle.open {
+  color: #e6edf3;
+  background: #30363d;
 }
 
 /* .input-row button(파란 Send 스타일)보다 우선해야 하므로 선택자를 더 구체적으로 */

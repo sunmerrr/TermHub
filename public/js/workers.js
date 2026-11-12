@@ -63,6 +63,42 @@ function cardActionButtonsHtml(id, status) {
     killBtnHtml(id, status);
 }
 
+// ⌨ 팝업의 특수 키. keys는 tmux send-keys 키 이름을 순서대로 보낸다.
+// 폰은 입력창으로 글자만 보낼 수 있어 커서 이동·편집·Ctrl 조합을 여기서 누른다
+const SPECIAL_KEY_GROUPS = [
+  { label: 'Keys', keys: [
+    ['esc', ['Escape']], ['↑', ['Up']], ['↓', ['Down']], ['↵', ['Enter'], 'key-enter'],
+    ['←', ['Left']], ['→', ['Right']], ['tab', ['Tab']], ['⇧tab', ['BTab'], '', '모드 전환 (Claude: 권한 모드)'],
+    ['home', ['Home']], ['end', ['End']], ['pgup', ['PPage']], ['pgdn', ['NPage']],
+    ['space', ['Space']], ['⌫', ['BSpace']], ['del', ['DC']], ['esc×2', ['Escape', 'Escape'], '', 'Claude: 이전 메시지로 되돌리기']
+  ] },
+  { label: 'Ctrl', keys: [
+    ['⌃c', ['C-c'], '', '중단'], ['⌃c×2', ['C-c', 'C-c'], '', '종료'], ['⌃d', ['C-d'], '', '입력 끝(EOF)·셸 종료'], ['⌃l', ['C-l'], '', '화면 다시 그리기'],
+    ['⌃u', ['C-u'], '', '줄 앞부분 지우기'], ['⌃k', ['C-k'], '', '줄 뒷부분 지우기'], ['⌃w', ['C-w'], '', '단어 지우기'], ['⌃r', ['C-r'], '', '입력 기록 검색'],
+    ['⌃a', ['C-a'], '', '줄 처음으로'], ['⌃e', ['C-e'], '', '줄 끝으로'], ['⌃z', ['C-z'], '', '일시 정지(백그라운드로)'], ['⌃\\', ['C-\\'], '', '강제 종료(SIGQUIT)']
+  ] },
+  { label: 'Claude', keys: [
+    ['/', ['/'], '', '슬래시 명령'], ['@', ['@'], '', '파일 언급'], ['!', ['!'], '', '셸 명령 모드'], ['?', ['?'], '', '단축키 도움말'],
+    ['⌃o', ['C-o'], '', '대화 기록 펼치기'], ['⌃t', ['C-t'], '', '할 일 목록'], ['⌃b', ['C-b'], '', '실행 중인 작업을 백그라운드로'], ['⌃_', ['C-_'], '', '입력 되돌리기']
+  ] }
+];
+
+function escapeHtml(text) {
+  return String(text).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
+}
+
+function specialKeysHtml() {
+  return SPECIAL_KEY_GROUPS.map(g =>
+    '<div class="tk-label">' + g.label + '</div>' +
+    '<div class="key-grid">' +
+      g.keys.map(([label, keys, cls, title]) =>
+        '<button class="key-btn' + (cls ? ' ' + cls : '') + '" data-keys="' + escapeHtml(JSON.stringify(keys)) + '"' +
+        (title ? ' title="' + escapeHtml(title) + '"' : '') + '>' + escapeHtml(label) + '</button>'
+      ).join('') +
+    '</div>'
+  ).join('');
+}
+
 function ensureCard(id, cwd, status, logs, cmd, reason, title, sessionName, startedAt, lastOutputAt, claudeName) {
   if (document.getElementById('card-' + id)) return;
 
@@ -94,18 +130,7 @@ function ensureCard(id, cwd, status, logs, cmd, reason, title, sessionName, star
       '<div class="toolkit-wrap">' +
         '<button class="toolkit-toggle" id="tk-btn-' + id + '">⌨</button>' +
         '<div class="toolkit-popup" id="tk-popup-' + id + '">' +
-          '<div class="tk-label">Keys</div>' +
-          '<div class="key-grid">' +
-            '<button class="key-btn" id="key-esc-' + id + '">esc</button>' +
-            '<button class="key-btn" id="key-up-' + id + '">↑</button>' +
-            '<button class="key-btn" id="key-down-' + id + '">↓</button>' +
-            '<button class="key-btn key-enter" id="key-enter-' + id + '">↵</button>' +
-            '<button class="key-btn" id="key-tab-' + id + '">tab</button>' +
-            '<button class="key-btn" id="key-stab-' + id + '">⇧tab</button>' +
-            '<button class="key-btn" id="key-ctrlc-' + id + '">⌃c</button>' +
-            '<button class="key-btn" id="key-ctrlc2-' + id + '" title="⌃c 두 번 (종료)">⌃c×2</button>' +
-            '<button class="key-btn" id="key-slash-' + id + '" title="슬래시 명령 자동완성">/</button>' +
-          '</div>' +
+          specialKeysHtml() +
           '<div class="tk-label tk-label-row">Quick<button class="tk-edit" id="tk-edit-' + id + '" title="빠른 입력 편집">✎</button></div>' +
           '<div class="preset-list" id="presets-' + id + '"></div>' +
           '<div class="tk-label">Text size</div>' +
@@ -331,18 +356,9 @@ function bindCard(id, root) {
   }
 
   // Key buttons
-  const keyMap = {
-    up: 'Up', down: 'Down', enter: 'Enter', esc: 'Escape',
-    tab: 'Tab', stab: 'BTab', ctrlc: 'C-c'
-  };
-  Object.entries(keyMap).forEach(([btnId, tmuxKey]) => {
-    const btn = q('#key-' + btnId + '-' + id);
-    if (btn) btn.addEventListener('click', () => sendSpecialKey(id, tmuxKey));
+  if (root.querySelectorAll) root.querySelectorAll('.key-btn[data-keys]').forEach(btn => {
+    btn.addEventListener('click', () => sendKeys(id, JSON.parse(btn.dataset.keys)));
   });
-  const slashBtn = q('#key-slash-' + id);
-  if (slashBtn) slashBtn.addEventListener('click', () => sendKeys(id, ['/']));
-  const ctrlc2Btn = q('#key-ctrlc2-' + id);
-  if (ctrlc2Btn) ctrlc2Btn.addEventListener('click', () => sendKeys(id, ['C-c', 'C-c']));
 
   // Quick presets
   const editBtn = q('#tk-edit-' + id);
