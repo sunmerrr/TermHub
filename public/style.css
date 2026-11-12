@@ -349,6 +349,11 @@ header h1 {
   display: flex;
 }
 
+/* 터미널 높이는 화면에서 받는다 — 내용 높이로 카드가 정해지면 xterm.js가 잰 행 수가 다시 내용 높이가 된다 */
+.tab-panel > .card {
+  flex: 1;
+}
+
 /* Split Mode */
 #split-content {
   flex: 1;
@@ -530,12 +535,12 @@ header h1 {
 .logs {
   font-family: "SF Mono", monospace;
   font-size: var(--log-font, 12px);
-  padding: 8px;
-  overflow-y: auto;
+  padding: 6px 0 0 8px;
   background: #0d1117;
   flex: 1;
   min-height: 100px;
-  resize: vertical;
+  /* xterm.js가 자체 스크롤 영역을 가진다. 다른 기기가 크기를 쥐고 있어 터미널이 상자보다 클 때만 바깥 상자가 스크롤된다 */
+  overflow: auto;
   /* 두 손가락 핀치는 브라우저 줌 대신 로그 글자 크기 조절에 쓴다 */
   touch-action: pan-x pan-y;
 }

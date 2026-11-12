@@ -83,7 +83,6 @@ function handleMsg(d) {
   if (d.type === 'spawned') ensureCard(d.id, d.cwd, d.status, [], d.cmd, d.reason || null, d.title || '', d.sessionName || '', d.startedAt || null, null, d.claudeName || '');
   if (d.type === 'claude') updateClaudeName(d.id, d.claudeName || '');
   if (d.type === 'ui_state') applyUiState(d.ui, false);
-  if (d.type === 'log') appendLog(d.id, d.src, d.text);
   if (d.type === 'status') updateStatus(d.id, d.status, d.reason || null);
   if (d.type === 'title') updateTitle(d.id, d.title || '');
   if (d.type === 'cwd') updateCwd(d.id, d.cwd);
@@ -94,29 +93,8 @@ function handleMsg(d) {
   if (d.type === 'preview_prompt') showPreviewPrompt(d.workerId, d.port, d.contentType);
   if (d.type === 'preview_tunnel') updatePreviewTunnel(d.port, d.url);
   if (d.type === 'preview_closed') closePreview(d.workerId, d.port);
-  if (d.type === 'snapshot') {
-    lastSnapshotLines[d.id] = d.lines;
-    updateChoices(d.id);
-    markWorkerOutput(d.id);
-    document.querySelectorAll('#logs-' + d.id).forEach(box => {
-      var wasAtBottom = isNearBottom(box);
-      // 500개 노드를 매번 새로 만들지 않고 바뀐 줄만 갱신한다
-      const existing = box.children;
-      d.lines.forEach((text, i) => {
-        if (i < existing.length) {
-          if (existing[i].textContent !== text) existing[i].textContent = text;
-          return;
-        }
-        const line = document.createElement('div');
-        line.className = 'log-line stdout';
-        line.textContent = text;
-        box.appendChild(line);
-      });
-      while (box.children.length > d.lines.length) box.removeChild(box.lastChild);
-      if (wasAtBottom) box.scrollTop = box.scrollHeight;
-      else updateJumpButton(box, true);
-    });
-  }
+  if (d.type === 'term') writeTermSeed(d);
+  if (d.type === 'out') writeTermOutput(d);
   if (d.type === 'paths') applyPaths(d);
   if (d.type === 'templates') {
     templates = Array.isArray(d.templates) ? d.templates : [];
@@ -134,18 +112,6 @@ function notifyActive(id) {
 
 // ── Terminal Resize ──
 
-function measureChar(box) {
-  const span = document.createElement('span');
-  span.className = 'log-line';
-  span.style.visibility = 'hidden';
-  span.style.position = 'absolute';
-  span.textContent = 'X';
-  box.appendChild(span);
-  const rect = span.getBoundingClientRect();
-  box.removeChild(span);
-  return { w: rect.width, h: rect.height };
-}
-
 // 워커별 마지막 전송 크기 — 같은 크기면 다시 보내지 않는다 (resize마다 TUI가 전체를 다시 그려 중복이 쌓인다)
 const lastSentSizes = {};
 
@@ -153,18 +119,13 @@ function sendResize(force) {
   if (!ws || ws.readyState !== 1) return;
   const MIN_COLS = 8;
   const MIN_ROWS = 4;
-  const box = Array.from(document.querySelectorAll('.logs'))
-    .find(el => el.clientWidth > 0 && el.clientHeight > 0 && el.getClientRects().length > 0);
-  if (!box || !box.clientWidth) return;
-  const ch = measureChar(box);
-  if (!ch.w || !ch.h) return;
-  const style = getComputedStyle(box);
-  const padX = (parseFloat(style.paddingLeft) || 0) + (parseFloat(style.paddingRight) || 0);
-  const padY = (parseFloat(style.paddingTop) || 0) + (parseFloat(style.paddingBottom) || 0);
-  const innerW = Math.max(0, box.clientWidth - padX);
-  const innerH = Math.max(0, box.clientHeight - padY);
-  const cols = Math.max(MIN_COLS, Math.floor(innerW / ch.w));
-  const rows = Math.max(MIN_ROWS, Math.floor(innerH / ch.h));
+  // 보이는 터미널 하나로 크기를 재서 모든 워커에 같은 크기를 제안한다 (숨은 탭 패널은 크기가 0이라 잴 수 없다)
+  const visible = Object.values(terms).find(x => x.box.clientWidth > 0 && x.box.clientHeight > 0 && x.box.getClientRects().length > 0);
+  if (!visible) return;
+  const dims = visible.fit.proposeDimensions();
+  if (!dims || !isFinite(dims.cols) || !isFinite(dims.rows)) return;
+  const cols = Math.max(MIN_COLS, dims.cols);
+  const rows = Math.max(MIN_ROWS, dims.rows);
   const key = cols + 'x' + rows;
   document.querySelectorAll('.tab').forEach(t => {
     const id = t.dataset.id;

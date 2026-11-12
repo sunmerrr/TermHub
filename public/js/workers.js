@@ -180,9 +180,11 @@ function ensureCard(id, cwd, status, logs, cmd, reason, title, sessionName, star
 
   renderTitle(id, cwd, cmdLabel);
   renderWorkerMeta(id);
+  // 터미널은 탭 패널 쪽에만 만든다 — 분할 화면 카드는 레이아웃 전환을 없앤 뒤로 보이지 않는다
+  const termBox = panel.querySelector('#logs-' + id);
+  if (termBox) createTerminal(id, termBox);
   if (logs) {
-    logs.forEach(l => appendLog(id, l.src, l.text));
-    // 다음 출력 변화 전에도 선택지 버튼을 띄울 수 있도록 초기 로그를 스냅샷으로 삼는다
+    // 첫 출력이 오기 전에도 선택지 버튼을 띄울 수 있도록 초기 로그를 스냅샷으로 삼는다
     lastSnapshotLines[id] = logs.map(l => l.text);
   }
   if (reason) updateExitReason(id, reason);
@@ -347,14 +349,13 @@ function bindCard(id, root) {
 
   const logs = q('#logs-' + id);
   const jumpBtn = q('#jump-' + id);
-  if (logs) {
-    bindPinchZoom(logs);
-    logs.addEventListener('scroll', () => updateJumpButton(logs));
-  }
-  if (jumpBtn && logs) {
+  if (logs) bindPinchZoom(logs);
+  if (jumpBtn) {
     jumpBtn.addEventListener('click', () => {
-      logs.scrollTop = logs.scrollHeight;
-      updateJumpButton(logs);
+      const t = terms[id];
+      if (!t) return;
+      t.term.scrollToBottom();
+      updateTermJump(id, false);
     });
   }
 }
@@ -443,6 +444,7 @@ function applyLogFontSize(px, resize) {
   document.documentElement.style.setProperty('--log-font', next + 'px');
   localStorage.setItem('logFontSize', String(next));
   document.querySelectorAll('.font-size-label').forEach(el => { el.textContent = next + 'px'; });
+  Object.values(terms).forEach(t => { t.term.options.fontSize = next; });
   // 글자 크기가 바뀌면 터미널 cols/rows도 달라진다
   if (resize) sendResize();
 }
@@ -466,23 +468,6 @@ function bindPinchZoom(box) {
     startDist = 0;
     applyLogFontSize(logFontSize, true);
   });
-}
-
-// ── Jump to Bottom ──
-
-function updateJumpButton(box, hasNew) {
-  const btn = box.parentElement && box.parentElement.querySelector('.jump-bottom');
-  if (!btn) return;
-  if (isNearBottom(box)) {
-    btn.classList.remove('show', 'has-new');
-    btn.textContent = '↓';
-    return;
-  }
-  btn.classList.add('show');
-  if (hasNew) {
-    btn.classList.add('has-new');
-    btn.textContent = '↓ 새 출력';
-  }
 }
 
 // ── Worker Meta (경과 시간 · 마지막 출력) ──
@@ -522,22 +507,112 @@ function markWorkerOutput(id) {
 
 setInterval(() => Object.keys(workerTimes).forEach(renderWorkerMeta), 30000);
 
-// ── Logs ──
+// ── Terminal (xterm.js) ──
+// 서버가 tmux pane 출력 바이트를 그대로 보내고(out), 처음 볼 때·크기가 바뀔 때 시작 화면(term)을 보낸다.
+// 터미널 크기는 서버가 정한 pane 크기를 따른다 — 이 기기 화면에서 계산한 크기는 sendResize로 제안만 한다.
 
-function isNearBottom(box) {
-  return box.scrollHeight - box.scrollTop - box.clientHeight < 50;
+const terms = {};
+// xterm.js는 앱의 질의(DA·커서 위치·색 조회 등)에 onData로 자동 응답한다. tmux가 이미 대신 답했으므로
+// 이것까지 보내면 앱에 쓰레기 입력이 된다 — 사용자 입력이 아닌 응답 형태는 버린다
+const TERM_REPLY_RE = /^\x1b(\[[?>]?[\d;]*[cnR]|\[[IO]|\][^\x07\x1b]*(\x07|\x1b\\)|P[^\x1b]*\x1b\\)$/;
+const TERM_SCAN_THROTTLE_MS = 250;
+
+function createTerminal(id, box) {
+  if (terms[id] || typeof Terminal === 'undefined') return;
+  const term = new Terminal({
+    fontFamily: '"SF Mono", Menlo, Consolas, monospace',
+    fontSize: logFontSize,
+    scrollback: 5000,
+    cursorBlink: false,
+    theme: { background: '#0d1117', foreground: '#e6edf3', cursor: '#e6edf3', selectionBackground: '#264f78' }
+  });
+  const fit = new FitAddon.FitAddon();
+  term.loadAddon(fit);
+  term.open(box);
+  // 터치 기기에서는 터미널을 눌러도 화상 키보드를 띄우지 않는다 — 입력은 아래 입력창으로 한다
+  if (window.matchMedia && matchMedia('(pointer: coarse)').matches) term.textarea.setAttribute('inputmode', 'none');
+  term.onData(data => {
+    if (TERM_REPLY_RE.test(data)) return;
+    if (!ws || ws.readyState !== 1) return;
+    ws.send(JSON.stringify({ type: 'input', id: String(id), data }));
+  });
+  term.onScroll(() => updateTermJump(id, false));
+  terms[id] = { term, fit, box, scanTimer: null };
 }
 
-function appendLog(id, src, text) {
-  document.querySelectorAll('#logs-' + id).forEach(box => {
-    var wasAtBottom = isNearBottom(box);
-    const line = document.createElement('div');
-    line.className = 'log-line ' + src;
-    line.textContent = text;
-    box.appendChild(line);
-    if (wasAtBottom) box.scrollTop = box.scrollHeight;
-    else updateJumpButton(box, true);
+function disposeTerminal(id) {
+  const t = terms[id];
+  if (!t) return;
+  clearTimeout(t.scanTimer);
+  t.term.dispose();
+  delete terms[id];
+}
+
+function base64Bytes(b64) {
+  const bin = atob(b64);
+  const bytes = new Uint8Array(bin.length);
+  for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
+  return bytes;
+}
+
+function isTermAtBottom(term) {
+  const b = term.buffer.active;
+  return b.viewportY >= b.baseY;
+}
+
+function updateTermJump(id, hasNew) {
+  const t = terms[id];
+  const btn = document.querySelector('.tab-panel #jump-' + id);
+  if (!t || !btn) return;
+  if (isTermAtBottom(t.term)) {
+    btn.classList.remove('show', 'has-new');
+    btn.textContent = '↓';
+    return;
+  }
+  btn.classList.add('show');
+  if (hasNew) {
+    btn.classList.add('has-new');
+    btn.textContent = '↓ 새 출력';
+  }
+}
+
+// 선택지 버튼(parseChoices)은 화면 아래쪽 글자를 본다 — 출력이 몰아칠 때 매번 읽지 않도록 묶어서 읽는다
+function scheduleTermScan(id) {
+  const t = terms[id];
+  if (!t || t.scanTimer) return;
+  t.scanTimer = setTimeout(() => {
+    t.scanTimer = null;
+    const b = t.term.buffer.active;
+    const lines = [];
+    for (let i = Math.max(0, b.length - 40); i < b.length; i++) {
+      const line = b.getLine(i);
+      lines.push(line ? line.translateToString(true) : '');
+    }
+    lastSnapshotLines[id] = lines;
+    updateChoices(id);
+  }, TERM_SCAN_THROTTLE_MS);
+}
+
+function writeTermSeed(d) {
+  const t = terms[d.id];
+  if (!t) return;
+  t.term.reset();
+  if (d.cols > 0 && d.rows > 0 && (t.term.cols !== d.cols || t.term.rows !== d.rows)) t.term.resize(d.cols, d.rows);
+  t.term.write(base64Bytes(d.d), () => {
+    t.term.scrollToBottom();
+    updateTermJump(d.id, false);
+    scheduleTermScan(d.id);
   });
+}
+
+function writeTermOutput(d) {
+  const t = terms[d.id];
+  if (!t) return;
+  t.term.write(base64Bytes(d.d), () => {
+    if (!isTermAtBottom(t.term)) updateTermJump(d.id, true);
+    scheduleTermScan(d.id);
+  });
+  markWorkerOutput(d.id);
 }
 
 function markPrompt(line, text) {
@@ -765,6 +840,7 @@ function removeWorkerDom(id) {
   delete workerAiSince[id];
   delete workerTimes[id];
   delete lastSentSizes[id];
+  disposeTerminal(id);
   removePreviewTabs(id);
   if (typeof closeGitDiff === 'function') closeGitDiff(id);
 

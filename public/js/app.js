@@ -100,6 +100,8 @@ document.addEventListener('keydown', e => {
     switchTab(1);
     return;
   }
+  // 터미널(xterm.js)에 포커스가 있으면 키는 터미널이 바이트로 바로 보낸다 — 여기서 또 보내면 두 번 입력된다
+  if (e.target.closest && e.target.closest('.xterm')) return;
 
   if (e.key === 'Escape') {
     e.preventDefault();

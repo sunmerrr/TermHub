@@ -20,7 +20,7 @@ Config files: `.env` (PORT, DASHBOARD_PASSWORD), `config.json` (basePath, favori
 
 ## Architecture
 
-**Server (`server.js`):** Single-file Node.js HTTP + WebSocket server. In-memory Maps for session/worker state. Calls tmux via `execSync` to create, control, and monitor terminal sessions. Polls terminal output every 1s and broadcasts via WebSocket.
+**Server (`server.js`):** Single-file Node.js HTTP + WebSocket server. In-memory Maps for session/worker state. Calls tmux via `execSync` to create, control, and monitor terminal sessions. Each running worker gets a tmux control-mode client (`tmux -C attach`); its `%output` bytes stream over WebSocket to the viewers of that worker and are drawn with xterm.js. A 1s `capture-pane` poll remains for state detection (waiting/idle, ports).
 
 **Client (`index.html` + `public/`):** CSS and JS separated into `public/style.css` and `public/js/`. Tab/Split dual layout modes. Real-time updates via WebSocket. localStorage for user preferences (layout, favorites, recents).
 
@@ -33,13 +33,14 @@ Config files: `.env` (PORT, DASHBOARD_PASSWORD), `config.json` (basePath, favori
 
 **Communication flow:**
 - REST API (`/api/*`): login, worker spawn/remove/input commands
-- WebSocket: server→client real-time broadcast (spawned, status, snapshot, log, cwd message types)
+- WebSocket: server→client real-time broadcast (spawned, status, log, cwd, …); terminal stream `term` (initial screen, sent on view and after resize) and `out` (raw pane bytes, base64); client→server `view`, `resize`, `input` (keystrokes typed into xterm.js, sent with `send-keys -H`)
 - Auth: password login → random token → HttpOnly cookie
 
 **tmux integration pattern:**
 - Session name: `term-{id}`
 - Create: `tmux new-session -d -s {name} -c {cwd} "{cmd}"`
-- Capture output: `tmux capture-pane -p -S -500 -J` (500 lines, 1s interval)
+- Stream output: control mode `%output`; initial screen via `capture-pane -p -e -S -2000` on the same control connection (ordered with the stream)
+- Pane size = the viewing browser's xterm.js size; the device that opens or types into a worker owns its size
 - Input: `tmux send-keys` for commands/special keys
 - Status: `tmux has-session` for liveness check
 - CWD tracking: `tmux display-message -p "#{pane_current_path}"` for real-time path updates

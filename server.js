@@ -25,7 +25,6 @@ const PREVIEW_HEALTH_INTERVAL_MS = Math.max(
   Number(process.env.PREVIEW_HEALTH_INTERVAL_MS || 60 * 60 * 1000)
 );
 const PREVIEW_CLOSE_FAILURES = Math.max(1, Number(process.env.PREVIEW_CLOSE_FAILURES || 1));
-const CLAUDE_MIN_ROWS = Math.max(50, Number(process.env.CLAUDE_MIN_ROWS || 500));
 // 리사이즈 후 TUI가 화면을 다시 그리는 동안 빈 캡처를 무시하는 시간 (1초 폴링 두 번 분량)
 const RESIZE_SETTLE_MS = 2500;
 const STATE_PATH = path.join(__dirname, ".termhub-state.json");
@@ -324,10 +323,9 @@ function getBaseCommand(cmd) {
   return String(cmd).trim().split(/\s+/)[0] || "";
 }
 
+// pane 크기는 브라우저 터미널(xterm.js) 크기와 같아야 한다 — 출력 바이트를 그대로 그리므로 크기가 다르면 줄이 어긋난다
 function terminalRowsForWorker(w) {
-  const rows = w.rows || 50;
-  // 전체 화면(alternate screen) TUI(codex 등)는 스크롤백을 남기지 않아 보이는 행만 캡처된다 — Claude처럼 pane을 키워 대화 전체가 화면 안에 들어오게 한다
-  return isClaudeWorker(w) || w.alternateScreen ? Math.max(rows, CLAUDE_MIN_ROWS) : rows;
+  return w.rows || 50;
 }
 
 function isClaudeWorker(w) {
@@ -1095,6 +1093,24 @@ function applyAiState(id, w, state) {
 
 let lastCapture = {};
 
+function applyWorkerSize(id) {
+  const w = workers.get(id);
+  if (!w || w.status !== "running") return;
+  const cols = w.cols || 80;
+  const rows = terminalRowsForWorker(w);
+  // 매초 2개의 resize 프로세스를 띄우지 않도록 크기가 바뀌었을 때만 적용 (외부 attach 대비 30초마다 재적용)
+  const sizeKey = `${cols}x${rows}`;
+  if (w.appliedSize === sizeKey && Date.now() - (w.appliedSizeAt || 0) <= 30000) return;
+  const changed = w.appliedSize !== sizeKey;
+  // 같은 크기 재적용은 TUI가 다시 그리지 않으므로 크기가 실제로 바뀐 때만 기록한다
+  if (changed) w.sizeChangedAt = Date.now();
+  tmux(`resize-pane -t ${w.sessionName} -x ${cols} -y ${rows}`);
+  tmux(`resize-window -t ${w.sessionName} -x ${cols} -y ${rows}`);
+  w.appliedSize = sizeKey;
+  w.appliedSizeAt = Date.now();
+  if (changed) scheduleTermReseed(id);
+}
+
 function pollOutput(id) {
   const w = workers.get(id);
   if (!w) return;
@@ -1115,17 +1131,11 @@ function pollOutput(id) {
     "#{alternate_on}\x1f#{pane_current_command}\x1f#{pane_title}\x1f#{pane_current_path}",
   ]).replace(/\n$/, "").split("\x1f");
   w.alternateScreen = altFlag === "1";
-  const cols = w.cols || 80;
-  const rows = terminalRowsForWorker(w);
-  // 매초 2개의 resize 프로세스를 띄우지 않도록 크기가 바뀌었을 때만 적용 (외부 attach 대비 30초마다 재적용)
-  const sizeKey = `${cols}x${rows}`;
-  if (w.appliedSize !== sizeKey || Date.now() - (w.appliedSizeAt || 0) > 30000) {
-    // 같은 크기 재적용은 TUI가 다시 그리지 않으므로 크기가 실제로 바뀐 때만 기록한다
-    if (w.appliedSize !== sizeKey) w.sizeChangedAt = Date.now();
-    tmux(`resize-pane -t ${w.sessionName} -x ${cols} -y ${rows}`);
-    tmux(`resize-window -t ${w.sessionName} -x ${cols} -y ${rows}`);
-    w.appliedSize = sizeKey;
-    w.appliedSizeAt = Date.now();
+  applyWorkerSize(id);
+  // 제어 클라이언트는 창 크기를 정한(resize-window → window-size manual) 뒤에 붙인다 — 먼저 붙으면 기본 80x24로 창을 줄인다
+  if (!termClients.has(id) && Date.now() - (w.termStartAt || 0) > TERM_RESTART_DELAY_MS) {
+    w.termStartAt = Date.now();
+    startTermClient(id);
   }
   const output = displayOutputForWorker(w, tmux(`capture-pane -t ${w.sessionName} -p -S -500 -J`));
 
@@ -1184,7 +1194,6 @@ function pollOutput(id) {
   w.lastChangeTime = Date.now();
   const lines = output.split("\n");
   w.logs = lines.slice(-200).map(text => ({ src: "stdout", text, ts: Date.now() }));
-  broadcastSnapshot(id, lines);
 
   // Output just changed — check for waiting, otherwise working
   applyAiState(id, w, fromRegistry || (detectWaiting(output) ? 'waiting' : 'working'));
@@ -1262,25 +1271,210 @@ function broadcast(obj) {
   });
 }
 
-// 스냅샷(최대 500줄)은 그 워커를 보고 있는 클라이언트에게만 보낸다 — 모바일 데이터·배터리 절약.
-// 'view' 메시지를 보낸 적 없는(구버전) 클라이언트는 전부 받는다.
-function broadcastSnapshot(id, lines) {
-  if (!wss) return;
-  const obj = { type: "snapshot", id, lines };
-  let msg = null;
-  wss.clients.forEach(c => {
-    if (c.readyState !== 1 || !canReceiveMessage(c.authContext, obj)) return;
-    if (c.viewing && !c.viewing.has(String(id))) return;
-    if (!msg) msg = JSON.stringify(obj);
-    c.send(msg);
+// ── 터미널 스트리밍 (tmux 제어 모드 → xterm.js) ──
+// capture-pane 폴링은 1초 늦고 색·커서가 없다. 워커마다 제어 모드 클라이언트(tmux -C)를 붙여
+// 앱이 pane에 쓴 바이트(%output)를 그대로 받아, 그 워커를 보고 있는 브라우저로 보낸다.
+// 새로 보기 시작한 브라우저에는 같은 제어 연결로 capture-pane을 보내 시작 화면을 만든다 —
+// 제어 모드는 명령 응답(%begin…%end)과 출력을 한 줄기로 순서대로 보내므로, 응답 앞의 출력은 캡처에 들어 있고
+// 뒤의 출력만 이어 보내면 빠지거나 겹치는 구간이 없다.
+const TERM_SEED_HISTORY = 2000;
+const TERM_FLUSH_MS = 16;
+const TERM_RESTART_DELAY_MS = 5000;
+// 리사이즈 직후 TUI가 화면을 다시 그릴 시간을 준 뒤 시작 화면을 다시 보낸다 (xterm.js와 tmux의 줄 재배치 방식이 달라 어긋나므로)
+const TERM_RESEED_DELAY_MS = 400;
+const TERM_INPUT_MAX_CHARS = 64 * 1024;
+const TERM_INPUT_CHUNK_BYTES = 512;
+// 시작 화면만으로는 앱이 켜 둔 bracketed paste 모드를 알 수 없다(tmux 포맷에 없음) — 켜는 것으로 알려진 TUI는 켠 상태로 시작한다
+const BRACKETED_PASTE_COMMANDS = new Set(["claude", "codex"]);
+const termClients = new Map();
+
+// %output 데이터는 0x20 미만 문자와 '\'를 \ooo(8진수)로 이스케이프한다. 나머지 바이트는 그대로 온다.
+function decodeControlOutput(line, start) {
+  const out = Buffer.allocUnsafe(line.length - start);
+  let n = 0;
+  for (let i = start; i < line.length; i++) {
+    if (line[i] === 0x5c && i + 3 < line.length) {
+      const a = line[i + 1] - 0x30, b = line[i + 2] - 0x30, c = line[i + 3] - 0x30;
+      if (a >= 0 && a < 8 && b >= 0 && b < 8 && c >= 0 && c < 8) {
+        out[n++] = a * 64 + b * 8 + c;
+        i += 3;
+        continue;
+      }
+    }
+    out[n++] = line[i];
+  }
+  return out.subarray(0, n);
+}
+
+function sendCtl(ctl, command, onReply) {
+  if (!ctl.proc.stdin.writable) return;
+  ctl.replies.push(onReply || null);
+  ctl.proc.stdin.write(command + "\n");
+}
+
+function startTermClient(id) {
+  const w = workers.get(id);
+  if (!w) return;
+  const proc = spawn("tmux", ["-u", "-C", "attach-session", "-t", w.sessionName], { stdio: ["pipe", "pipe", "pipe"] });
+  // replies[0]은 attach 명령 자체의 %begin/%end 응답 자리다
+  const ctl = { proc, replies: [null], block: null, rest: null, out: [], flushTimer: null, live: new Set(), waiting: new Set(), seedQueued: false, reseedTimer: null };
+  termClients.set(id, ctl);
+  proc.stdout.on("data", chunk => onCtlData(id, ctl, chunk));
+  proc.stderr.on("data", d => console.error(`⚠️  tmux control #${id}: ${d.toString().trim()}`));
+  proc.stdin.on("error", e => console.error(`⚠️  tmux control #${id} stdin: ${e.message}`));
+  proc.on("error", e => console.error(`⚠️  tmux control #${id} failed: ${e.message}`));
+  proc.on("exit", () => {
+    flushTermOutput(id, ctl);
+    clearTimeout(ctl.reseedTimer);
+    if (termClients.get(id) === ctl) termClients.delete(id);
+  });
+  // 서버 재시작 직후처럼 제어 연결보다 먼저 보고 있던 브라우저도 붙인다
+  if (wss) wss.clients.forEach(c => {
+    if (c.readyState === 1 && c.viewing && c.viewing.has(id)) ctl.waiting.add(c);
+  });
+  if (ctl.waiting.size) requestTermSeed(id, ctl);
+}
+
+function onCtlData(id, ctl, chunk) {
+  const data = ctl.rest ? Buffer.concat([ctl.rest, chunk]) : chunk;
+  let pos = 0;
+  let nl;
+  while ((nl = data.indexOf(0x0a, pos)) !== -1) {
+    onCtlLine(id, ctl, data.subarray(pos, nl));
+    pos = nl + 1;
+  }
+  ctl.rest = pos < data.length ? Buffer.from(data.subarray(pos)) : null;
+}
+
+function startsWith(buf, prefix) {
+  return buf.length >= prefix.length && buf.toString("latin1", 0, prefix.length) === prefix;
+}
+
+function onCtlLine(id, ctl, line) {
+  if (ctl.block) {
+    if (startsWith(line, "%end ") || startsWith(line, "%error ")) {
+      const lines = ctl.block;
+      ctl.block = null;
+      const onReply = ctl.replies.shift();
+      if (onReply) onReply(lines, startsWith(line, "%error "));
+    } else {
+      ctl.block.push(Buffer.from(line));
+    }
+    return;
+  }
+  if (startsWith(line, "%begin ")) {
+    ctl.block = [];
+  } else if (startsWith(line, "%output ")) {
+    // %output %<pane> <data>
+    const sp = line.indexOf(0x20, 8);
+    if (sp === -1) return;
+    ctl.out.push(decodeControlOutput(line, sp + 1));
+    if (!ctl.flushTimer) ctl.flushTimer = setTimeout(() => flushTermOutput(id, ctl), TERM_FLUSH_MS);
+  }
+}
+
+function flushTermOutput(id, ctl) {
+  clearTimeout(ctl.flushTimer);
+  ctl.flushTimer = null;
+  if (!ctl.out.length) return;
+  const buf = Buffer.concat(ctl.out);
+  ctl.out = [];
+  if (!ctl.live.size) return;
+  const msg = JSON.stringify({ type: "out", id, d: buf.toString("base64") });
+  ctl.live.forEach(c => {
+    if (c.readyState === 1) c.send(msg);
+    else ctl.live.delete(c);
   });
 }
 
-function sendCurrentSnapshot(ws, id) {
-  const w = workers.get(String(id));
+function requestTermSeed(id, ctl) {
+  const w = workers.get(id);
+  if (!w || ctl.seedQueued) return;
+  ctl.seedQueued = true;
+  let info = null;
+  sendCtl(ctl, `display-message -p -t ${w.sessionName} '#{cursor_x},#{cursor_y},#{cursor_flag},#{alternate_on},#{pane_width},#{pane_height}'`, lines => {
+    info = lines[0] ? lines[0].toString("latin1") : null;
+  });
+  sendCtl(ctl, `capture-pane -p -e -t ${w.sessionName} -S -${TERM_SEED_HISTORY}`, (lines, failed) => {
+    ctl.seedQueued = false;
+    // 응답 앞의 출력은 캡처에 들어 있다 — 이미 보고 있던 브라우저에 먼저 보내고 나서 시작 화면을 보낸다
+    flushTermOutput(id, ctl);
+    if (failed || !info) {
+      console.error(`⚠️  Terminal seed for #${id} failed`);
+      return;
+    }
+    const [cx, cy, cursorOn, alt, cols, rows] = info.split(",");
+    const rowCount = Number(rows) || lines.length;
+    const screen = alt === "1" ? lines.slice(-rowCount) : lines;
+    const parts = [];
+    if (alt === "1") parts.push(Buffer.from("\x1b[?1049h\x1b[H"));
+    screen.forEach((l, i) => {
+      if (i) parts.push(Buffer.from("\r\n"));
+      parts.push(l);
+    });
+    let tail = `\x1b[0m\x1b[${Number(cy) + 1};${Number(cx) + 1}H`;
+    if (cursorOn === "0") tail += "\x1b[?25l";
+    if (BRACKETED_PASTE_COMMANDS.has(isClaudeWorker(w) ? "claude" : w.expectedCmd)) tail += "\x1b[?2004h";
+    parts.push(Buffer.from(tail));
+    const msg = JSON.stringify({ type: "term", id, cols: Number(cols), rows: rowCount, d: Buffer.concat(parts).toString("base64") });
+    ctl.waiting.forEach(c => {
+      if (c.readyState !== 1) return;
+      c.send(msg);
+      ctl.live.add(c);
+    });
+    ctl.waiting.clear();
+  });
+}
+
+function scheduleTermReseed(id) {
+  const ctl = termClients.get(id);
+  if (!ctl) return;
+  clearTimeout(ctl.reseedTimer);
+  ctl.reseedTimer = setTimeout(() => {
+    // 다시 보낼 때까지의 출력은 새 시작 화면에 들어가므로 보고 있던 브라우저를 대기열로 옮긴다
+    ctl.live.forEach(c => ctl.waiting.add(c));
+    ctl.live.clear();
+    if (ctl.waiting.size) requestTermSeed(id, ctl);
+  }, TERM_RESEED_DELAY_MS);
+}
+
+function attachTermViewer(ws, id) {
+  const w = workers.get(id);
   if (!w) return;
-  const lines = lastCapture[String(id)] !== undefined ? lastCapture[String(id)].split("\n") : w.logs.map(l => l.text);
-  ws.send(JSON.stringify({ type: "snapshot", id: String(id), lines }));
+  const ctl = termClients.get(id);
+  if (ctl) {
+    ctl.waiting.add(ws);
+    requestTermSeed(id, ctl);
+    return;
+  }
+  // 세션이 끝난(제어 연결이 없는) 워커는 마지막 캡처를 글자 그대로 보여 준다
+  const text = lastCapture[id] !== undefined ? lastCapture[id] : (w.logs || []).map(l => l.text).join("\n");
+  const lines = text.split("\n");
+  ws.send(JSON.stringify({
+    type: "term", id, cols: w.cols || 80, rows: w.rows || 50,
+    d: Buffer.from(lines.join("\r\n") + "\x1b[?25l").toString("base64"),
+  }));
+}
+
+function detachTermViewer(ws, id) {
+  const ctl = termClients.get(id);
+  if (!ctl) return;
+  ctl.live.delete(ws);
+  ctl.waiting.delete(ws);
+}
+
+// 키 입력은 바이트 그대로 보낸다(send-keys -H) — 방향키·Ctrl 조합·한글이 브라우저에서 만든 그대로 앱에 간다
+function sendTermInput(id, data) {
+  const w = workers.get(id);
+  if (!w) return;
+  const bytes = Buffer.from(data, "utf8");
+  const ctl = termClients.get(id);
+  for (let i = 0; i < bytes.length; i += TERM_INPUT_CHUNK_BYTES) {
+    const hex = Array.from(bytes.subarray(i, i + TERM_INPUT_CHUNK_BYTES), b => b.toString(16).padStart(2, "0"));
+    if (ctl) sendCtl(ctl, `send-keys -t ${w.sessionName} -H ${hex.join(" ")}`);
+    else tmuxExec(["send-keys", "-t", w.sessionName, "-H", ...hex]);
+  }
+  rememberAction(w, "input", "terminal");
 }
 
 function readBody(req) {
@@ -1478,7 +1672,7 @@ function canReceiveMessage(ctx, obj) {
   if (obj.type === "preview_tunnel") {
     return detectedPorts.get(workerId)?.has(Number(obj.port)) || false;
   }
-  return ["spawned", "log", "status", "cwd", "aiState", "task", "git", "snapshot", "title", "presets", "preview_detected", "preview_prompt", "preview_closed"].includes(obj.type);
+  return ["spawned", "log", "status", "cwd", "aiState", "task", "git", "title", "presets", "preview_detected", "preview_prompt", "preview_closed"].includes(obj.type);
 }
 
 function canAccessWorker(ctx, workerId) {
@@ -1991,8 +2185,26 @@ wss.on('connection', (ws, req) => {
         const ids = Array.isArray(msg.ids) ? msg.ids.map(String).filter(id => canAccessWorker(ctx, id)) : [];
         const previous = ws.viewing || new Set();
         ws.viewing = new Set(ids);
-        // 새로 보기 시작한 워커는 현재 화면을 바로 보내준다
-        ids.forEach(id => { if (!previous.has(id)) sendCurrentSnapshot(ws, id); });
+        // 새로 보기 시작한 워커는 현재 화면부터 보내고 실시간 출력을 이어 붙인다.
+        // 터미널은 pane 크기 그대로 그려져 크기가 다른 기기에서는 잘리므로, 지금 그 탭을 연 기기가 크기의 주인이 된다
+        ids.forEach(id => {
+          if (previous.has(id)) return;
+          claimWorkerSize(id, clientSizes.get(ws), ws);
+          applyWorkerSize(id);
+          attachTermViewer(ws, id);
+        });
+        previous.forEach(id => { if (!ws.viewing.has(id)) detachTermViewer(ws, id); });
+        return;
+      }
+      if (msg.type === 'input') {
+        const id = String(msg.id);
+        if (typeof msg.data !== "string" || !msg.data || msg.data.length > TERM_INPUT_MAX_CHARS) return;
+        if (!workers.has(id) || !canAccessWorker(ctx, id)) return;
+        ws.lastPresence = Date.now();
+        // 터미널에 직접 친 기기가 그 워커 크기의 주인이 된다 ('active'와 같은 규칙)
+        claimWorkerSize(id, clientSizes.get(ws), ws);
+        applyWorkerSize(id);
+        sendTermInput(id, msg.data);
         return;
       }
       if (msg.type === 'resize') {
@@ -2000,6 +2212,7 @@ wss.on('connection', (ws, req) => {
         clientSizes.set(ws, size);
         if (msg.id && workers.has(String(msg.id)) && canAccessWorker(ctx, msg.id)) {
           setWorkerSize(msg.id, size, ws);
+          applyWorkerSize(String(msg.id));
         } else if (ctx.kind === "full") {
           setAllUnownedWorkerSizes(size, ws);
         } else {
@@ -2011,6 +2224,7 @@ wss.on('connection', (ws, req) => {
         if (msg.id && workers.has(String(msg.id)) && canAccessWorker(ctx, msg.id)) {
           // 입력한 기기가 그 워커 크기의 주인이 된다
           claimWorkerSize(msg.id, size, ws);
+          applyWorkerSize(String(msg.id));
         } else if (size && ctx.kind === "full") {
           setAllUnownedWorkerSizes(size, ws);
         } else if (size) {
@@ -2020,6 +2234,7 @@ wss.on('connection', (ws, req) => {
     } catch (e) {}
   });
   ws.on('close', () => {
+    (ws.viewing || new Set()).forEach(id => detachTermViewer(ws, id));
     clientSizes.delete(ws);
     releaseResizeOwnership(ws);
   });
