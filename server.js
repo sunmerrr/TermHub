@@ -2335,6 +2335,16 @@ wss.on('connection', (ws, req) => {
         if (!workers.has(id) || !canAccessWorker(ctx, id)) return;
         ws.lastPresence = Date.now();
         // 터미널에 직접 친 기기가 그 워커 크기의 주인이 된다 ('active'와 같은 규칙)
+        const w = workers.get(id);
+        // 명령이 끝나 셸로 돌아온(completed) 워커에 다시 입력하면 /api/key·sendInput처럼 감시를 재개한다 — 셸에서 claude를 다시 띄우는 경우
+        if (w.status === "completed" && isAlive(w.sessionName)) {
+          w.status = "running";
+          w.aiState = null;
+          w.exitReason = null;
+          w.seenExpectedCmd = false;
+          startPolling(id);
+          broadcast({ type: "status", id, status: "running", reason: null });
+        }
         claimWorkerSize(id, clientSizes.get(ws), ws);
         applyWorkerSize(id);
         sendTermInput(id, msg.data);
