@@ -516,6 +516,9 @@ const terms = {};
 // 이것까지 보내면 앱에 쓰레기 입력이 된다 — 사용자 입력이 아닌 응답 형태는 버린다
 const TERM_REPLY_RE = /^\x1b(\[[?>]?[\d;]*[cnR]|\[[IO]|\][^\x07\x1b]*(\x07|\x1b\\)|P[^\x1b]*\x1b\\)$/;
 const TERM_SCAN_THROTTLE_MS = 250;
+// 마우스·트랙패드 기기(PC)는 터미널에 바로 입력하고 아래 입력창을 숨긴다(style.css의 pointer: fine).
+// 터치 기기는 xterm.js의 한글 조합이 불안정해 입력창을 그대로 쓴다. 화면 너비가 아니라 입력 방식으로 나눈다
+const directTermInput = !!(window.matchMedia && matchMedia('(pointer: fine)').matches);
 
 function createTerminal(id, box) {
   if (terms[id] || typeof Terminal === 'undefined') return;
@@ -531,6 +534,14 @@ function createTerminal(id, box) {
   term.open(box);
   // 터치 기기에서는 터미널을 눌러도 화상 키보드를 띄우지 않는다 — 입력은 아래 입력창으로 한다
   if (window.matchMedia && matchMedia('(pointer: coarse)').matches) term.textarea.setAttribute('inputmode', 'none');
+  // 입력창이 없는 PC에서도 이미지 붙여넣기로 첨부할 수 있게 한다 — xterm.js보다 먼저 받아야 하므로 capture 단계에서 처리
+  box.addEventListener('paste', e => {
+    const files = e.clipboardData && e.clipboardData.files;
+    if (!files || !files.length) return;
+    e.preventDefault();
+    e.stopPropagation();
+    uploadFiles(id, files);
+  }, true);
   term.onData(data => {
     if (TERM_REPLY_RE.test(data)) return;
     if (!ws || ws.readyState !== 1) return;
@@ -960,6 +971,12 @@ function sendKeys(id, keys) {
 
 // 올린 파일의 서버 경로를 입력창 끝에 붙인다 — 사용자가 메시지를 덧붙여 보내면 AI가 그 경로를 읽는다
 function appendPathToInput(id, filePath) {
+  const t = terms[id];
+  if (directTermInput && t && ws && ws.readyState === 1) {
+    ws.send(JSON.stringify({ type: 'input', id: String(id), data: filePath + ' ' }));
+    t.term.focus();
+    return;
+  }
   document.querySelectorAll('#inp-' + id).forEach(inp => {
     const cur = inp.value;
     inp.value = cur + (cur && !/\s$/.test(cur) ? ' ' : '') + filePath + ' ';

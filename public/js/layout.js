@@ -129,6 +129,7 @@ function selectTab(id, fromUser) {
   document.querySelectorAll('.tab-panel').forEach(p => p.classList.toggle('active', p.dataset.id === id));
   setTimeout(sendResize, 0);
   if (typeof sendView === 'function') sendView();
+  if (typeof directTermInput !== 'undefined' && directTermInput && terms[id]) terms[id].term.focus();
   if (fromUser && isWorkerTabId(id)) saveUiState({ activeTab: String(id) });
 }
 

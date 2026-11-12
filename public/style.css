@@ -605,6 +605,18 @@ header h1 {
   align-items: center;
 }
 
+/* PC(마우스·트랙패드)는 터미널에 바로 입력한다 — 입력창과 Send를 숨기고 📎·⌨만 오른쪽에 둔다 (workers.js directTermInput) */
+@media (pointer: fine) {
+  .input-row {
+    justify-content: flex-end;
+    padding: 4px 8px;
+  }
+  .input-row textarea,
+  .input-row > button[id^="send-"] {
+    display: none;
+  }
+}
+
 .input-row textarea {
   flex: 1;
   min-width: 0;
