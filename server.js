@@ -1039,6 +1039,106 @@ async function readGitInfo(cwd) {
   };
 }
 
+// ── 커밋 (Diff 패널) ──
+const COMMIT_MESSAGE_TIMEOUT_MS = 90000;
+const COMMIT_DIFF_MAX_CHARS = 60000;
+const COMMIT_MESSAGE_MAX_CHARS = 10000;
+const COMMIT_MESSAGE_MODEL = process.env.COMMIT_MESSAGE_MODEL || "haiku";
+const commitMessageInFlight = new Set();
+
+// --porcelain -z는 경로를 따옴표·8진수 이스케이프 없이 그대로 준다(한글 파일명). 이름 변경·복사는 "새 경로\0옛 경로" 두 칸이다
+function parsePorcelainZ(text) {
+  const tokens = text.split("\0");
+  const entries = [];
+  for (let i = 0; i < tokens.length; i++) {
+    const tok = tokens[i];
+    if (tok.length < 4) continue;
+    const xy = tok.slice(0, 2);
+    const entry = { xy, path: tok.slice(3), oldPath: null };
+    if (xy.includes("R") || xy.includes("C")) entry.oldPath = tokens[++i] || null;
+    entries.push(entry);
+  }
+  return entries;
+}
+
+function porcelainStatusLetter(xy) {
+  if (xy === "??") return "A";
+  if (xy.includes("D")) return "D";
+  if (xy.includes("A")) return "A";
+  if (xy.includes("R")) return "R";
+  return "M";
+}
+
+function gitRun(cwd, args, opts = {}) {
+  // 파일 이름이 ':'로 시작해도 pathspec 매직으로 읽지 않게 한다
+  return new Promise(resolve => {
+    execFile("git", ["--literal-pathspecs", "-C", cwd, ...args], { encoding: "utf8", timeout: opts.timeout || 30000, maxBuffer: 20 * 1024 * 1024 }, (err, stdout, stderr) => {
+      resolve({ ok: !err, code: err ? err.code : 0, stdout: stdout || "", stderr: stderr || (err && !stderr ? err.message : "") });
+    });
+  });
+}
+
+// 요청한 파일 중 지금 실제로 바뀐 것만 고른다 — 브라우저 목록이 오래됐거나 엉뚱한 경로가 와도 그 밖은 건드리지 않는다
+async function selectChangedEntries(cwd, files) {
+  const status = await gitRun(cwd, ["status", "--porcelain", "-z", "--untracked-files=all"]);
+  if (!status.ok) return { error: status.stderr.trim() || "not a git repo" };
+  const wanted = new Set((Array.isArray(files) ? files : []).map(String));
+  const entries = parsePorcelainZ(status.stdout).filter(e => wanted.has(e.path));
+  if (!entries.length) return { error: "선택한 파일에 커밋할 변경이 없어요." };
+  return { entries };
+}
+
+async function buildCommitDiff(cwd, entries) {
+  const tracked = entries.filter(e => e.xy !== "??");
+  const untracked = entries.filter(e => e.xy === "??");
+  let diff = "";
+  if (tracked.length) {
+    const paths = tracked.flatMap(e => e.oldPath ? [e.path, e.oldPath] : [e.path]);
+    const head = await gitRun(cwd, ["diff", "--no-color", "HEAD", "--", ...paths]);
+    // 첫 커밋 전(HEAD 없음)이면 스테이징·워킹트리 기준으로 본다
+    diff += head.ok ? head.stdout : (await gitRun(cwd, ["diff", "--no-color", "--", ...paths])).stdout;
+  }
+  for (const e of untracked) {
+    if (diff.length > COMMIT_DIFF_MAX_CHARS) break;
+    // 차이가 있으면 종료 코드 1이라 ok가 false여도 stdout을 쓴다
+    diff += (await gitRun(cwd, ["diff", "--no-color", "--no-index", "--", "/dev/null", e.path])).stdout;
+  }
+  if (diff.length > COMMIT_DIFF_MAX_CHARS) diff = diff.slice(0, COMMIT_DIFF_MAX_CHARS) + "\n[diff truncated]\n";
+  return diff;
+}
+
+// 터미널에서 쓰는 claude CLI로 메시지를 만든다 — 로그인된 구독을 그대로 쓰므로 API 키가 필요 없다.
+// 저장소 밖(임시 폴더)에서 user 설정 없이 돌려 프로젝트 훅·MCP 서버·도구가 끼어들지 않게 한다
+function generateCommitMessage(diff, recentSubjects) {
+  const prompt = [
+    "Write a git commit message for the diff on stdin.",
+    "Use Conventional Commits (feat:, fix:, refactor:, docs:, chore:). Subject line under 72 characters, then a blank line and a short body only if it helps.",
+    "Match the language and tone of these recent commit subjects:",
+    recentSubjects || "(no commits yet)",
+    "Do not mention Claude, Anthropic or AI. Do not add trailers such as Co-Authored-By. Output only the message, no code fences.",
+  ].join("\n");
+  return new Promise((resolve, reject) => {
+    const proc = spawn("claude", [
+      "-p", "--model", COMMIT_MESSAGE_MODEL, "--setting-sources", "local", "--tools", "",
+      "--strict-mcp-config", "--no-session-persistence", prompt,
+    ], { cwd: os.tmpdir(), stdio: ["pipe", "pipe", "pipe"] });
+    let out = "";
+    let errText = "";
+    const timer = setTimeout(() => proc.kill("SIGTERM"), COMMIT_MESSAGE_TIMEOUT_MS);
+    proc.stdout.on("data", d => { out += d; });
+    proc.stderr.on("data", d => { errText += d; });
+    proc.on("error", e => { clearTimeout(timer); reject(e); });
+    proc.on("close", code => {
+      clearTimeout(timer);
+      const message = out.trim().replace(/^```[a-z]*\n?|\n?```$/g, "").trim();
+      if (code === 0 && message) resolve(message);
+      else reject(new Error((errText || out).trim() || `claude exited with ${code}`));
+    });
+    proc.stdin.on("error", e => console.error(`⚠️  commit message stdin: ${e.message}`));
+    proc.stdin.end(diff);
+  });
+}
+
 function refreshGitInfo() {
   const byCwd = new Map();
   for (const [id, w] of workers) {
@@ -1979,6 +2079,50 @@ const server = http.createServer(async (req, res) => {
     return json(res, 200, { ok: false });
   }
 
+  if (method === "POST" && url === "/api/git-commit-message") {
+    if (ctx.kind !== "full") return json(res, 403, { error: "forbidden" });
+    const { id, files } = JSON.parse(await readBody(req));
+    const w = workers.get(String(id));
+    if (!w) return json(res, 404, { error: "worker not found" });
+    if (commitMessageInFlight.has(String(id))) return json(res, 409, { error: "이미 메시지를 만들고 있어요." });
+    const picked = await selectChangedEntries(w.cwd, files);
+    if (picked.error) return json(res, 400, { error: picked.error });
+    commitMessageInFlight.add(String(id));
+    try {
+      const diff = await buildCommitDiff(w.cwd, picked.entries);
+      const log = await gitRun(w.cwd, ["log", "-10", "--format=%s"]);
+      const message = await generateCommitMessage(diff, log.ok ? log.stdout.trim() : "");
+      return json(res, 200, { message });
+    } catch (e) {
+      console.error(`⚠️  Commit message for #${id} failed: ${e.message}`);
+      return json(res, 500, { error: "메시지 생성 실패: " + e.message.slice(0, 300) });
+    } finally {
+      commitMessageInFlight.delete(String(id));
+    }
+  }
+
+  if (method === "POST" && url === "/api/git-commit") {
+    if (ctx.kind !== "full") return json(res, 403, { error: "forbidden" });
+    const { id, files, message } = JSON.parse(await readBody(req));
+    const w = workers.get(String(id));
+    if (!w) return json(res, 404, { error: "worker not found" });
+    const text = typeof message === "string" ? message.trim() : "";
+    if (!text || text.length > COMMIT_MESSAGE_MAX_CHARS) return json(res, 400, { error: "커밋 메시지를 입력하세요." });
+    const picked = await selectChangedEntries(w.cwd, files);
+    if (picked.error) return json(res, 400, { error: picked.error });
+    const paths = picked.entries.flatMap(e => e.oldPath ? [e.path, e.oldPath] : [e.path]);
+    // 경로를 주면 git commit은 그 경로만 커밋한다(--only) — 다른 세션이 스테이징해 둔 파일은 섞이지 않는다
+    const add = await gitRun(w.cwd, ["add", "-A", "--", ...paths]);
+    if (!add.ok) return json(res, 400, { error: add.stderr.trim() || "git add failed" });
+    // pre-commit 훅이 오래 걸릴 수 있어 넉넉히 기다린다
+    const commit = await gitRun(w.cwd, ["commit", "-m", text, "--", ...paths], { timeout: 120000 });
+    if (!commit.ok) return json(res, 400, { error: (commit.stderr || commit.stdout).trim().slice(0, 2000) || "git commit failed" });
+    const head = await gitRun(w.cwd, ["log", "-1", "--format=%h %s"]);
+    rememberAction(w, "git_commit", head.stdout.trim());
+    setTimeout(refreshGitInfo, 0);
+    return json(res, 200, { ok: true, commit: head.stdout.trim() });
+  }
+
   if (method === "GET" && url === "/api/git-diff") {
     if (ctx.kind !== "full") return json(res, 403, { error: "forbidden" });
     const params = new URL(req.url, 'http://localhost').searchParams;
@@ -2017,20 +2161,9 @@ const server = http.createServer(async (req, res) => {
         }
         return json(res, 200, { diff });
       } else {
-        // 파일 목록: git status --porcelain (untracked 포함)
-        const status = execFileSync('git', ['-C', cwd, 'status', '--porcelain'], execOpts);
-        // trim()하면 첫 줄의 상태 칸(" M")까지 깎여 첫 파일 이름이 한 글자 잘린다 — 줄 끝만 정리한다
-        const files = status.replace(/\s+$/, '').split('\n').filter(Boolean).map(line => {
-          const xy = line.substring(0, 2).trim();
-          const filePath = line.substring(3);
-          // 상태 매핑: M=수정, A=추가, D=삭제, ?=untracked(신규), R=이름변경
-          let s = 'M';
-          if (xy === '??') s = 'A';
-          else if (xy.includes('D')) s = 'D';
-          else if (xy.includes('A')) s = 'A';
-          else if (xy.includes('R')) s = 'R';
-          return { status: s, path: filePath };
-        });
+        // 파일 목록: 커밋 대상과 같은 경로를 쓰도록 -z(이스케이프 없는 원래 경로)로 읽는다. 새 폴더는 안의 파일까지 펼친다
+        const status = execFileSync('git', ['-C', cwd, 'status', '--porcelain', '-z', '--untracked-files=all'], execOpts);
+        const files = parsePorcelainZ(status).map(e => ({ status: porcelainStatusLetter(e.xy), path: e.path }));
 
         let stat = '';
         try {

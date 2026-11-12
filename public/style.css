@@ -1374,6 +1374,83 @@ body[data-scoped-worker] .preset-add {
   white-space: nowrap;
 }
 
+/* 커밋 영역: 파일 목록 위 (체크한 파일만 커밋) */
+.diff-commit {
+  padding: 6px;
+  border-bottom: 1px solid #30363d;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  flex-shrink: 0;
+}
+
+.diff-commit-msg {
+  width: 100%;
+  box-sizing: border-box;
+  background: #161b22;
+  border: 1px solid #30363d;
+  border-radius: 5px;
+  color: #e6edf3;
+  font-size: 12px;
+  font-family: -apple-system, sans-serif;
+  padding: 5px 6px;
+  resize: vertical;
+  min-height: 52px;
+}
+
+.diff-commit-actions {
+  display: flex;
+  gap: 4px;
+}
+
+.diff-commit-actions button {
+  flex: 1;
+  border-radius: 5px;
+  font-size: 11px;
+  padding: 4px 0;
+  cursor: pointer;
+}
+
+.diff-commit-gen {
+  background: #21262d;
+  border: 1px solid #30363d;
+  color: #c9d1d9;
+}
+
+.diff-commit-btn {
+  background: #238636;
+  border: 1px solid #2ea043;
+  color: #fff;
+}
+
+.diff-commit-actions button[disabled] {
+  opacity: 0.5;
+  cursor: progress;
+}
+
+.diff-commit-status {
+  font-size: 11px;
+  color: #8b949e;
+  word-break: break-all;
+  white-space: pre-wrap;
+  max-height: 120px;
+  overflow-y: auto;
+}
+
+.diff-commit-status:empty {
+  display: none;
+}
+
+.diff-commit-status.error {
+  color: #f85149;
+}
+
+.diff-file-check {
+  margin: 0 4px 0 0;
+  vertical-align: middle;
+  cursor: pointer;
+}
+
 .diff-notes-send {
   background: #1f6feb;
   border: none;

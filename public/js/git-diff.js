@@ -43,6 +43,14 @@ function openGitDiff(workerId) {
     '</div>' +
     '<div class="diff-body">' +
       '<div class="diff-file-sidebar">' +
+        '<div class="diff-commit">' +
+          '<textarea class="diff-commit-msg" rows="3" placeholder="커밋 메시지 (체크한 파일만 커밋)"></textarea>' +
+          '<div class="diff-commit-actions">' +
+            '<button class="diff-commit-gen" title="체크한 파일의 변경으로 메시지 초안을 만듭니다">✨ 초안</button>' +
+            '<button class="diff-commit-btn">커밋</button>' +
+          '</div>' +
+          '<div class="diff-commit-status"></div>' +
+        '</div>' +
         '<div class="diff-file-list"></div>' +
       '</div>' +
       '<div class="diff-sidebar-toggle">◀</div>' +
@@ -62,6 +70,21 @@ function openGitDiff(workerId) {
 
   container.querySelector('.diff-notes-send').addEventListener('click', function() {
     sendDiffNotes(workerId);
+  });
+
+  container.querySelector('.diff-commit-gen').addEventListener('click', function() {
+    generateCommitDraft(workerId);
+  });
+  container.querySelector('.diff-commit-btn').addEventListener('click', function() {
+    commitCheckedFiles(workerId);
+  });
+  container.querySelector('.diff-commit-msg').addEventListener('keydown', function(e) {
+    // 터미널 단축키(app.js)로 새지 않게 막고, Cmd/Ctrl+Enter로 커밋한다
+    e.stopPropagation();
+    if (e.key === 'Enter' && (e.metaKey || e.ctrlKey)) {
+      e.preventDefault();
+      commitCheckedFiles(workerId);
+    }
   });
 
   // 사이드바 토글
@@ -128,9 +151,13 @@ function loadFileList(workerId) {
         var filename = trimmed.split('/').pop() || f.path;
         item.title = f.path;
         item.innerHTML =
-          '<span class="diff-file-status ' + f.status + '">' + f.status + '</span> ' +
-          filename;
+          '<input type="checkbox" class="diff-file-check" checked title="커밋에 포함">' +
+          '<span class="diff-file-status ' + f.status + '">' + f.status + '</span> ';
+        item.appendChild(document.createTextNode(filename));
 
+        item.querySelector('.diff-file-check').addEventListener('click', function(e) {
+          e.stopPropagation();
+        });
         item.addEventListener('click', function() {
           loadFileDiff(workerId, f.path);
         });
@@ -141,6 +168,77 @@ function loadFileList(workerId) {
     .catch(function(err) {
       fileList.innerHTML = '<div style="padding:8px;font-size:11px;color:#f85149">로드 실패: ' + err.message + '</div>';
     });
+}
+
+// ── 커밋 ──
+
+function checkedDiffFiles(container) {
+  return Array.from(container.querySelectorAll('.diff-file-item')).filter(function(item) {
+    var box = item.querySelector('.diff-file-check');
+    return box && box.checked;
+  }).map(function(item) { return item.dataset.path; });
+}
+
+function setCommitStatus(container, text, isError) {
+  var el = container.querySelector('.diff-commit-status');
+  el.textContent = text || '';
+  el.classList.toggle('error', !!isError);
+}
+
+function setCommitBusy(container, busy) {
+  container.querySelectorAll('.diff-commit-gen, .diff-commit-btn').forEach(function(btn) { btn.disabled = busy; });
+}
+
+function postJson(url, body) {
+  return fetch(url, {
+    method: 'POST',
+    credentials: 'include',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(body)
+  }).then(function(r) {
+    return r.json().then(function(data) {
+      if (!r.ok || data.error) throw new Error(data.error || ('HTTP ' + r.status));
+      return data;
+    });
+  });
+}
+
+function generateCommitDraft(workerId) {
+  var container = document.querySelector('.split-diff[data-worker-id="' + workerId + '"]');
+  if (!container) return;
+  var files = checkedDiffFiles(container);
+  if (!files.length) { setCommitStatus(container, '커밋할 파일을 체크하세요.', true); return; }
+  setCommitBusy(container, true);
+  setCommitStatus(container, '초안 만드는 중… (10초 안팎)');
+  postJson('/api/git-commit-message', { id: workerId, files: files })
+    .then(function(data) {
+      var ta = container.querySelector('.diff-commit-msg');
+      ta.value = data.message;
+      setCommitStatus(container, '초안을 확인·수정한 뒤 커밋하세요.');
+    })
+    .catch(function(err) { setCommitStatus(container, err.message, true); })
+    .finally(function() { setCommitBusy(container, false); });
+}
+
+function commitCheckedFiles(workerId) {
+  var container = document.querySelector('.split-diff[data-worker-id="' + workerId + '"]');
+  if (!container) return;
+  var ta = container.querySelector('.diff-commit-msg');
+  var message = ta.value.trim();
+  var files = checkedDiffFiles(container);
+  if (!files.length) { setCommitStatus(container, '커밋할 파일을 체크하세요.', true); return; }
+  if (!message) { setCommitStatus(container, '커밋 메시지를 입력하세요.', true); ta.focus(); return; }
+  setCommitBusy(container, true);
+  setCommitStatus(container, '커밋하는 중…');
+  postJson('/api/git-commit', { id: workerId, files: files, message: message })
+    .then(function(data) {
+      ta.value = '';
+      setCommitStatus(container, '커밋됨: ' + data.commit);
+      loadFileList(workerId);
+      container.querySelector('.diff-content').innerHTML = '<div class="diff-placeholder">파일을 선택하세요</div>';
+    })
+    .catch(function(err) { setCommitStatus(container, err.message, true); })
+    .finally(function() { setCommitBusy(container, false); });
 }
 
 function loadFileDiff(workerId, filePath) {
