@@ -277,6 +277,8 @@ function loadFileDiff(workerId, filePath) {
       }
       var ui = new Diff2HtmlUI(diffContent, data.diff, {
         outputFormat: 'line-by-line',
+        // 기본(light)은 추가·삭제 줄 배경이 밝은 연두·분홍이라 어두운 테마의 밝은 글자가 묻힌다
+        colorScheme: 'dark',
         matching: 'lines',
         highlight: true,
         drawFileList: false,
