@@ -1151,6 +1151,511 @@ function generateCommitMessage(diff, recentSubjects) {
   });
 }
 
+// ── 사용량: 워커별 토큰·추정 비용·컨텍스트, 계정 한도 ──
+// Orca(stablyai/orca, MIT)와 같은 방식이다.
+// - Claude: 대화 기록(~/.claude/projects/*/<세션>.jsonl)의 assistant 행 usage를 합산하고, 한도는 OAuth 사용량 API로 조회한다.
+// - Codex: 기록(~/.codex/sessions/**/rollout-*.jsonl)의 token_count 이벤트에 누적 토큰·컨텍스트 창·한도가 함께 들어 있다.
+// 비용은 "API로 썼다면" 기준의 추정치다(구독 요금제에서는 실제 청구액이 아니다). 단가는 Orca 단가표를 옮겼다.
+const USAGE_SCAN_MS = 10000;
+const CODEX_FILE_LIST_MS = 30000;
+const CLAUDE_LIMITS_POLL_MS = 15 * 60 * 1000;
+const CLAUDE_LIMITS_MIN_REFETCH_MS = 5 * 60 * 1000;
+const CLAUDE_LIMITS_TIMEOUT_MS = 10000;
+const CLAUDE_USAGE_URL = "https://api.anthropic.com/api/oauth/usage";
+const CODEX_SESSIONS_DIR = path.join(os.homedir(), ".codex", "sessions");
+const CODEX_LONG_CONTEXT_TOKENS = 272000;
+const CODEX_LIMITS_TAIL_BYTES = 512 * 1024;
+
+// USD / 1M tokens. cacheWrite는 5분 캐시, cacheWrite1h는 1시간 캐시 쓰기 단가
+const CLAUDE_PRICING = {
+  "claude-fable-5-2": { input: 8, output: 40, cacheRead: 0.2, cacheWrite: 10, cacheWrite1h: 16 },
+  "claude-mythos-5-2": { input: 8, output: 40, cacheRead: 0.2, cacheWrite: 10, cacheWrite1h: 16 },
+  "claude-fable-5-1": { input: 10, output: 50, cacheRead: 0.25, cacheWrite: 12.5, cacheWrite1h: 20 },
+  "claude-mythos-5-1": { input: 10, output: 50, cacheRead: 0.25, cacheWrite: 12.5, cacheWrite1h: 20 },
+  "claude-fable-5": { input: 10, output: 50, cacheRead: 1, cacheWrite: 12.5, cacheWrite1h: 20 },
+  "claude-mythos-5": { input: 10, output: 50, cacheRead: 1, cacheWrite: 12.5, cacheWrite1h: 20 },
+  "claude-opus-5-5": { input: 4, output: 20, cacheRead: 0.2, cacheWrite: 5, cacheWrite1h: 8 },
+  "claude-opus-5": { input: 5, output: 25, cacheRead: 0.5, cacheWrite: 6.25, cacheWrite1h: 10 },
+  "claude-sonnet-5-5": { input: 2, output: 10, cacheRead: 0.1, cacheWrite: 2.5, cacheWrite1h: 4 },
+  "claude-sonnet-5": { input: 2, output: 10, cacheRead: 0.2, cacheWrite: 2.5, cacheWrite1h: 4 },
+  "claude-opus-4-8": { input: 5, output: 25, cacheRead: 0.5, cacheWrite: 6.25, cacheWrite1h: 10 },
+  "claude-opus-4-7": { input: 5, output: 25, cacheRead: 0.5, cacheWrite: 6.25, cacheWrite1h: 10 },
+  "claude-opus-4-6": { input: 5, output: 25, cacheRead: 0.5, cacheWrite: 6.25, cacheWrite1h: 10 },
+  "claude-opus-4-5": { input: 5, output: 25, cacheRead: 0.5, cacheWrite: 6.25, cacheWrite1h: 10 },
+  "claude-opus-4-1": { input: 15, output: 75, cacheRead: 1.5, cacheWrite: 18.75, cacheWrite1h: 30 },
+  "claude-opus-4": { input: 15, output: 75, cacheRead: 1.5, cacheWrite: 18.75, cacheWrite1h: 30 },
+  "claude-sonnet-4-6": { input: 3, output: 15, cacheRead: 0.3, cacheWrite: 3.75, cacheWrite1h: 6 },
+  "claude-sonnet-4-5": { input: 3, output: 15, cacheRead: 0.3, cacheWrite: 3.75, cacheWrite1h: 6, longContext: { thresholdTokens: 200000, input: 6, output: 22.5, cacheRead: 0.6, cacheWrite: 7.5, cacheWrite1h: 12 } },
+  "claude-sonnet-4": { input: 3, output: 15, cacheRead: 0.3, cacheWrite: 3.75, cacheWrite1h: 6, longContext: { thresholdTokens: 200000, input: 6, output: 22.5, cacheRead: 0.6, cacheWrite: 7.5, cacheWrite1h: 12 } },
+  "claude-haiku-5-5": { input: 0.1, output: 0.5, cacheRead: 0.01, cacheWrite: 0.125, cacheWrite1h: 0.2, longContext: { thresholdTokens: 100000, input: 0.5, output: 2.5, cacheRead: 0.05, cacheWrite: 0.625, cacheWrite1h: 1 } },
+  "claude-haiku-4-5": { input: 1, output: 5, cacheRead: 0.1, cacheWrite: 1.25, cacheWrite1h: 2 },
+  "claude-haiku-3-5": { input: 0.8, output: 4, cacheRead: 0.08, cacheWrite: 1, cacheWrite1h: 1.6 },
+};
+// 1M 컨텍스트가 기본이 아닌(200K) 모델
+const CLAUDE_200K_CONTEXT = new Set(["claude-haiku-4-5", "claude-haiku-3-5", "claude-sonnet-4-5", "claude-sonnet-4", "claude-opus-4-5", "claude-opus-4-1", "claude-opus-4"]);
+
+const CODEX_PRICING = {
+  "gpt-5": { input: 1.25, cachedInput: 0.125, output: 10 },
+  "gpt-5.1": { input: 1.25, cachedInput: 0.125, output: 10 },
+  "gpt-5.1-codex": { input: 1.25, cachedInput: 0.125, output: 10 },
+  "gpt-5.1-codex-max": { input: 1.25, cachedInput: 0.125, output: 10 },
+  "gpt-5.2": { input: 1.75, cachedInput: 0.175, output: 14 },
+  "gpt-5.2-pro": { input: 21, cachedInput: 21, output: 168 },
+  "gpt-5.2-codex": { input: 1.75, cachedInput: 0.175, output: 14 },
+  "gpt-5.3": { input: 1.75, cachedInput: 0.175, output: 14 },
+  "gpt-5.3-codex": { input: 1.75, cachedInput: 0.175, output: 14 },
+  "gpt-5.3-codex-spark": { input: 1.75, cachedInput: 0.175, output: 14 },
+  "gpt-5.4-mini": { input: 0.75, cachedInput: 0.075, output: 4.5 },
+  "gpt-5.4-nano": { input: 0.2, cachedInput: 0.02, output: 1.25 },
+  "gpt-5.4-pro": { input: 30, cachedInput: 30, output: 180, longContext: { input: 60, cachedInput: 60, output: 270 } },
+  "gpt-5.4": { input: 2.5, cachedInput: 0.25, output: 15, longContext: { input: 5, cachedInput: 0.5, output: 22.5 } },
+  "gpt-5.5-pro": { input: 30, cachedInput: 30, output: 180, longContext: { input: 60, cachedInput: 60, output: 270 } },
+  "gpt-5.5": { input: 5, cachedInput: 0.5, output: 30, longContext: { input: 10, cachedInput: 1, output: 45 } },
+  "gpt-5.6-sol": { input: 4, cachedInput: 0.4, output: 20, longContext: { input: 8, cachedInput: 0.8, output: 30 } },
+  "gpt-5.6-terra": { input: 2, cachedInput: 0.2, output: 12, longContext: { input: 4, cachedInput: 0.4, output: 18 } },
+  "gpt-5.6-luna": { input: 0.2, cachedInput: 0.02, output: 1.2, longContext: { input: 0.4, cachedInput: 0.04, output: 1.8 } },
+  "gpt-6-astra": { input: 10, cachedInput: 1, output: 50, longContext: { input: 20, cachedInput: 2, output: 75 } },
+  "gpt-6-sol": { input: 2, cachedInput: 0.2, output: 10, longContext: { input: 4, cachedInput: 0.4, output: 15 } },
+  "gpt-6.1-sol": { input: 2, cachedInput: 0.1, output: 10, longContext: { input: 4, cachedInput: 0.2, output: 15 } },
+  "gpt-6-luna": { input: 0.1, cachedInput: 0.01, output: 0.5, longContext: { input: 0.2, cachedInput: 0.02, output: 0.75 } },
+};
+const CODEX_PRICING_KEYS = Object.keys(CODEX_PRICING).sort((a, b) => b.length - a.length);
+const CODEX_REASONING_SUFFIXES = ["minimal", "low", "medium", "high", "xhigh", "auto", "none"];
+
+// claude-opus-5-5-20260401, claude-3-5-sonnet-20241022, opus[1m] 같은 ID를 단가표 키로 맞춘다
+function claudeModelKey(model) {
+  if (!model) return null;
+  const lower = String(model).toLowerCase().replace(/\./g, "-");
+  const familyFirst = /(?:^|[^a-z])(fable|mythos|opus|sonnet|haiku)-(\d{1,2})(?:-(\d{1,2})(?![0-9a-z]))?(?![0-9])/.exec(lower);
+  const versionFirst = /(?:^|[^0-9a-z])(\d{1,2})(?:-(\d{1,2}))?-(fable|mythos|opus|sonnet|haiku)(?![a-z])/.exec(lower);
+  let key = null;
+  if (familyFirst) key = `claude-${familyFirst[1]}-${familyFirst[2]}${familyFirst[3] !== undefined ? "-" + familyFirst[3] : ""}`;
+  else if (versionFirst) key = `claude-${versionFirst[3]}-${versionFirst[1]}${versionFirst[2] !== undefined ? "-" + versionFirst[2] : ""}`;
+  return key && CLAUDE_PRICING[key] ? key : null;
+}
+
+function claudeTurnCost(model, t) {
+  const key = claudeModelKey(model);
+  if (!key) return null;
+  const pricing = CLAUDE_PRICING[key];
+  const prompt = t.input + t.cacheRead + t.cacheWrite;
+  // 긴 컨텍스트 할증은 그 요청 전체에 붙는다
+  const r = pricing.longContext && prompt > pricing.longContext.thresholdTokens ? pricing.longContext : pricing;
+  const write1h = Math.min(t.write1h, t.cacheWrite);
+  return (t.input * r.input + t.output * r.output + t.cacheRead * r.cacheRead + (t.cacheWrite - write1h) * r.cacheWrite + write1h * r.cacheWrite1h) / 1e6;
+}
+
+function codexModelKey(model) {
+  if (!model) return null;
+  let m = String(model).toLowerCase().trim().replace(/\((minimal|low|medium|high|xhigh|auto|none|max|ultra)\)$/, "");
+  for (let i = 0; i < 4; i++) {
+    const suffix = CODEX_REASONING_SUFFIXES.find(s => m.endsWith("-" + s));
+    if (!suffix) break;
+    m = m.slice(0, -suffix.length - 1);
+  }
+  if (m === "gpt-5-codex") return "gpt-5";
+  return CODEX_PRICING_KEYS.find(k => m === k || m.startsWith(k + "-")) || null;
+}
+
+function codexTurnCost(model, input, cached, output, longContext) {
+  const key = codexModelKey(model);
+  if (!key) return null;
+  const pricing = CODEX_PRICING[key];
+  const r = longContext && pricing.longContext ? pricing.longContext : pricing;
+  // 캐시된 입력은 input에 포함돼 있다 — 빼고 캐시 단가로 따로 매긴다
+  const c = Math.min(Math.max(cached, 0), Math.max(input, 0));
+  return ((Math.max(input - c, 0)) * r.input + c * r.cachedInput + Math.max(output, 0) * r.output) / 1e6;
+}
+
+// 기록 파일을 앞에서부터 한 번 읽고, 이후에는 늘어난 부분만 읽는다
+const usageScans = new Map();
+
+async function readAppendedLines(file) {
+  let scan = usageScans.get(file);
+  const st = await fs.promises.stat(file);
+  if (!scan || st.size < scan.offset) {
+    scan = { offset: 0, rest: "", state: null };
+    usageScans.set(file, scan);
+  }
+  if (st.size === scan.offset) return { scan, lines: [] };
+  const fh = await fs.promises.open(file, "r");
+  try {
+    const length = st.size - scan.offset;
+    const buf = Buffer.alloc(length);
+    await fh.read(buf, 0, length, scan.offset);
+    scan.offset = st.size;
+    const text = scan.rest + buf.toString("utf8");
+    const lines = text.split("\n");
+    scan.rest = lines.pop();
+    return { scan, lines };
+  } finally {
+    await fh.close();
+  }
+}
+
+function claudeTranscriptPath(sessionId) {
+  const projectsDir = path.join(os.homedir(), ".claude", "projects");
+  let dirs = [];
+  try { dirs = fs.readdirSync(projectsDir); } catch (e) { return null; }
+  for (const d of dirs) {
+    const p = path.join(projectsDir, d, `${sessionId}.jsonl`);
+    if (fs.existsSync(p)) return p;
+  }
+  return null;
+}
+
+async function scanClaudeUsage(file) {
+  const { scan, lines } = await readAppendedLines(file);
+  if (!scan.state) scan.state = { turns: new Map(), last: null };
+  const st = scan.state;
+  for (const line of lines) {
+    if (!line.includes('"usage"')) continue;
+    let d;
+    try { d = JSON.parse(line); } catch (e) { continue; }
+    const m = d && d.type === "assistant" && d.message;
+    const u = m && m.usage;
+    if (!u || m.model === "<synthetic>") continue;
+    const t = {
+      model: m.model || null,
+      input: u.input_tokens || 0,
+      output: u.output_tokens || 0,
+      cacheRead: u.cache_read_input_tokens || 0,
+      cacheWrite: u.cache_creation_input_tokens || 0,
+      write1h: (u.cache_creation && u.cache_creation.ephemeral_1h_input_tokens) || 0,
+    };
+    if (!t.input && !t.output && !t.cacheRead && !t.cacheWrite) continue;
+    // 스트리밍 중 같은 응답이 여러 행으로 남는다 — 뒤 행일수록 값이 완전하므로 항목별 최댓값을 쓴다
+    const key = m.id && d.requestId ? `${m.id}:${d.requestId}` : (m.id ? `msg:${m.id}` : `uuid:${d.uuid}`);
+    const prev = st.turns.get(key);
+    const merged = prev ? {
+      model: t.model || prev.model,
+      input: Math.max(prev.input, t.input), output: Math.max(prev.output, t.output),
+      cacheRead: Math.max(prev.cacheRead, t.cacheRead), cacheWrite: Math.max(prev.cacheWrite, t.cacheWrite),
+      write1h: Math.max(prev.write1h, t.write1h),
+    } : t;
+    st.turns.set(key, merged);
+    st.last = merged;
+  }
+  let input = 0, output = 0, cacheRead = 0, cacheWrite = 0, cost = 0, priced = false;
+  for (const t of st.turns.values()) {
+    input += t.input; output += t.output; cacheRead += t.cacheRead; cacheWrite += t.cacheWrite;
+    const c = claudeTurnCost(t.model, t);
+    if (c !== null) { cost += c; priced = true; }
+  }
+  const last = st.last;
+  const key = last ? claudeModelKey(last.model) : null;
+  const ctxTokens = last ? last.input + last.cacheRead + last.cacheWrite + last.output : 0;
+  const ctxWindow = key && CLAUDE_200K_CONTEXT.has(key) ? 200000 : 1000000;
+  return {
+    provider: "claude",
+    model: last ? last.model : null,
+    tokens: input + output + cacheRead + cacheWrite,
+    input, output, cacheRead, cacheWrite,
+    costUsd: priced ? cost : null,
+    ctxTokens,
+    ctxWindow,
+    ctxPercent: last ? Math.min(100, Math.round(ctxTokens / ctxWindow * 100)) : null,
+  };
+}
+
+// Codex 기록 파일 목록과 첫 줄(session_meta: cwd)을 캐시한다
+let codexFiles = { at: 0, list: [] };
+const codexMetaCwd = new Map();
+
+async function listCodexRollouts() {
+  if (Date.now() - codexFiles.at < CODEX_FILE_LIST_MS) return codexFiles.list;
+  const out = [];
+  const walk = async (dir, depth) => {
+    let entries = [];
+    try { entries = await fs.promises.readdir(dir, { withFileTypes: true }); } catch (e) { return; }
+    for (const e of entries) {
+      const p = path.join(dir, e.name);
+      if (e.isDirectory() && depth < 4) await walk(p, depth + 1);
+      else if (e.isFile() && /^rollout-.*\.jsonl$/.test(e.name)) out.push(p);
+    }
+  };
+  await walk(CODEX_SESSIONS_DIR, 0);
+  codexFiles = { at: Date.now(), list: out };
+  return out;
+}
+
+async function codexRolloutCwd(file) {
+  if (codexMetaCwd.has(file)) return codexMetaCwd.get(file);
+  let cwd = null;
+  const fh = await fs.promises.open(file, "r");
+  try {
+    const buf = Buffer.alloc(64 * 1024);
+    const { bytesRead } = await fh.read(buf, 0, buf.length, 0);
+    const first = buf.toString("utf8", 0, bytesRead).split("\n")[0];
+    try { cwd = JSON.parse(first).payload.cwd || null; } catch (e) { cwd = null; }
+  } finally {
+    await fh.close();
+  }
+  codexMetaCwd.set(file, cwd);
+  return cwd;
+}
+
+// TUI가 아니라 app-server 데몬이 기록을 쓰므로 프로세스로는 파일을 찾을 수 없다 —
+// 워커가 시작된 뒤 갱신됐고 같은 폴더에서 시작된 기록 중 가장 최근 것을 그 워커의 세션으로 본다
+async function findCodexRollout(w) {
+  const since = (w.startedAt || 0) - 60000;
+  let best = null;
+  for (const file of await listCodexRollouts()) {
+    let st;
+    try { st = await fs.promises.stat(file); } catch (e) { continue; }
+    if (st.mtimeMs < since || (best && st.mtimeMs <= best.mtime)) continue;
+    if (await codexRolloutCwd(file) !== w.cwd) continue;
+    best = { file, mtime: st.mtimeMs };
+  }
+  return best ? best.file : null;
+}
+
+const CODEX_PROCESS_CHECK_MS = 60000;
+
+// codex는 node 래퍼로 떠서 pane 명령이 "node"로 보이고, tmux에서 복구된 워커는 저장된 명령도 믿을 수 없다 —
+// pane 아래 프로세스 중에 codex 실행 파일이 있는지 본다 (1분 캐시)
+function isCodexWorker(w) {
+  const base = getBaseCommand(w.cmd || w.expectedCmd);
+  if (base === "codex" || base.endsWith("/codex")) return true;
+  if (w.codexCheck && Date.now() - w.codexCheck.at < CODEX_PROCESS_CHECK_MS) return w.codexCheck.value;
+  let value = false;
+  const panePid = tmuxExec(["display-message", "-p", "-t", w.sessionName, "#{pane_pid}"]).trim();
+  const pids = [...collectDescendantPids(panePid)];
+  if (pids.length) {
+    let comms = "";
+    try {
+      comms = execFileSync("ps", ["-o", "comm=", "-p", pids.join(",")], { encoding: "utf8", stdio: "pipe" });
+    } catch (e) {
+      comms = e.stdout || "";
+    }
+    value = comms.split("\n").some(c => path.basename(c.trim()) === "codex");
+  }
+  w.codexCheck = { at: Date.now(), value };
+  return value;
+}
+
+async function scanCodexUsage(file) {
+  const { scan, lines } = await readAppendedLines(file);
+  if (!scan.state) scan.state = { model: null, prevTotal: null, cost: 0, priced: false, total: null, last: null, window: null };
+  const st = scan.state;
+  for (const line of lines) {
+    if (!line.includes('"turn_context"') && !line.includes('"token_count"')) continue;
+    let d;
+    try { d = JSON.parse(line); } catch (e) { continue; }
+    const p = d && d.payload;
+    if (!p) continue;
+    if (d.type === "turn_context" && p.model) { st.model = p.model; continue; }
+    if (p.type !== "token_count" || !p.info || !p.info.total_token_usage) continue;
+    const total = p.info.total_token_usage;
+    const last = p.info.last_token_usage || null;
+    // 누적값의 증가분이 이번 요청 몫이다 (같은 값이 반복 기록되면 증가분 0)
+    const prev = st.prevTotal || { input_tokens: 0, cached_input_tokens: 0, output_tokens: 0 };
+    const dIn = Math.max(0, (total.input_tokens || 0) - (prev.input_tokens || 0));
+    const dCached = Math.max(0, (total.cached_input_tokens || 0) - (prev.cached_input_tokens || 0));
+    const dOut = Math.max(0, (total.output_tokens || 0) - (prev.output_tokens || 0));
+    if (dIn || dOut) {
+      const long = !!(last && last.input_tokens > CODEX_LONG_CONTEXT_TOKENS);
+      const c = codexTurnCost(st.model, dIn, dCached, dOut, long);
+      if (c !== null) { st.cost += c; st.priced = true; }
+    }
+    st.prevTotal = total;
+    st.total = total;
+    st.last = last;
+    if (p.info.model_context_window) st.window = p.info.model_context_window;
+  }
+  const total = st.total || {};
+  const ctxTokens = st.last ? (st.last.input_tokens || 0) : 0;
+  return {
+    provider: "codex",
+    model: st.model,
+    tokens: total.total_tokens || ((total.input_tokens || 0) + (total.output_tokens || 0)),
+    input: total.input_tokens || 0,
+    output: total.output_tokens || 0,
+    cacheRead: total.cached_input_tokens || 0,
+    cacheWrite: 0,
+    costUsd: st.priced ? st.cost : null,
+    ctxTokens,
+    ctxWindow: st.window,
+    ctxPercent: st.window && st.last ? Math.min(100, Math.round(ctxTokens / st.window * 100)) : null,
+  };
+}
+
+let usageScanInFlight = false;
+async function refreshWorkerUsage() {
+  if (usageScanInFlight) return;
+  usageScanInFlight = true;
+  try {
+    for (const [id, w] of workers) {
+      if (w.status !== "running") continue;
+      let usage = null;
+      try {
+        if (w.claudeSessionId) {
+          if (!w.usageFile || w.usageFileFor !== w.claudeSessionId) {
+            w.usageFile = claudeTranscriptPath(w.claudeSessionId);
+            w.usageFileFor = w.claudeSessionId;
+          }
+          if (w.usageFile) usage = await scanClaudeUsage(w.usageFile);
+        } else if (isCodexWorker(w)) {
+          const file = await findCodexRollout(w);
+          if (file) usage = await scanCodexUsage(file);
+        }
+      } catch (e) {
+        console.error(`⚠️  Usage scan for #${id} failed: ${e.message}`);
+        continue;
+      }
+      if (!usage) continue;
+      const key = JSON.stringify(usage);
+      if (key === w.usageKey) continue;
+      w.usageKey = key;
+      w.usage = usage;
+      broadcast({ type: "usage", id, usage });
+    }
+  } finally {
+    usageScanInFlight = false;
+  }
+}
+
+// ── 계정 한도 ──
+let accountLimits = { claude: null, codex: null };
+let claudeLimitsState = { fetchedAt: 0, retryAt: 0, inFlight: false };
+
+function readClaudeOAuthToken() {
+  // 키체인(서비스 "Claude Code-credentials", 계정 = 로그인 사용자) → 없으면 ~/.claude/.credentials.json
+  const account = /^[a-zA-Z0-9._-]+$/.test(os.userInfo().username) ? os.userInfo().username : "claude-code-user";
+  let raw = null;
+  try {
+    raw = execFileSync("security", ["find-generic-password", "-s", "Claude Code-credentials", "-a", account, "-w"], { encoding: "utf8", stdio: "pipe", timeout: 5000 });
+  } catch (e) {
+    const file = path.join(os.homedir(), ".claude", ".credentials.json");
+    if (fs.existsSync(file)) raw = fs.readFileSync(file, "utf8");
+  }
+  if (!raw) return null;
+  try {
+    const oauth = JSON.parse(raw).claudeAiOauth;
+    return oauth && oauth.accessToken ? oauth.accessToken : null;
+  } catch (e) {
+    console.error(`⚠️  Claude credentials are not JSON: ${e.message}`);
+    return null;
+  }
+}
+
+function usageResetMs(value) {
+  if (value === null || value === undefined) return null;
+  if (typeof value === "number") return value > 1e10 ? value : value * 1000;
+  const t = Date.parse(value);
+  return Number.isFinite(t) ? t : null;
+}
+
+function claudeLimitWindow(win) {
+  if (!win) return null;
+  const pct = typeof win.utilization === "number" ? win.utilization : (typeof win.used_percentage === "number" ? win.used_percentage : null);
+  if (pct === null) return null;
+  return { percent: Math.max(0, Math.min(100, Math.round(pct))), resetsAt: usageResetMs(win.resets_at) };
+}
+
+async function fetchClaudeLimits() {
+  const st = claudeLimitsState;
+  if (st.inFlight || Date.now() < st.retryAt) return;
+  st.inFlight = true;
+  st.fetchedAt = Date.now();
+  try {
+    const token = readClaudeOAuthToken();
+    if (!token) {
+      accountLimits.claude = { error: "Claude 로그인 정보를 찾지 못했어요." };
+      return;
+    }
+    const res = await fetch(CLAUDE_USAGE_URL, {
+      headers: { Authorization: `Bearer ${token}`, "anthropic-beta": "oauth-2025-04-20", "User-Agent": "claude-code/2.1.0" },
+      signal: AbortSignal.timeout(CLAUDE_LIMITS_TIMEOUT_MS),
+    });
+    if (res.status === 429) {
+      const wait = Number(res.headers.get("retry-after")) || CLAUDE_LIMITS_POLL_MS / 1000;
+      st.retryAt = Date.now() + wait * 1000;
+      console.error(`⚠️  Claude usage API rate-limited, retrying in ${wait}s`);
+      return;
+    }
+    if (res.status === 401 || res.status === 403) {
+      // 토큰은 Claude CLI가 실행될 때 갱신된다 — 여기서 갱신하지 않는다
+      accountLimits.claude = { error: "로그인 토큰이 만료됐어요. Claude를 한 번 실행하면 갱신돼요." };
+      return;
+    }
+    if (!res.ok) {
+      console.error(`⚠️  Claude usage API returned ${res.status}`);
+      return;
+    }
+    const data = await res.json();
+    const scoped = (Array.isArray(data.limits) ? data.limits : [])
+      .filter(l => l && l.kind === "weekly_scoped" && typeof l.percent === "number")
+      .map(l => ({ label: (l.scope && l.scope.model && l.scope.model.display_name) || "model", percent: Math.round(l.percent), resetsAt: usageResetMs(l.resets_at) }));
+    accountLimits.claude = {
+      session: claudeLimitWindow(data.five_hour),
+      weekly: claudeLimitWindow(data.seven_day),
+      scoped,
+      updatedAt: Date.now(),
+    };
+  } catch (e) {
+    console.error(`⚠️  Claude usage fetch failed: ${e.message}`);
+  } finally {
+    st.inFlight = false;
+    broadcast({ type: "limits", limits: accountLimits });
+  }
+}
+
+// Codex는 가장 최근 기록 파일 끝부분의 마지막 token_count에 한도가 들어 있다 — API 호출이 필요 없다
+async function refreshCodexLimits() {
+  let newest = null;
+  for (const file of await listCodexRollouts()) {
+    let st;
+    try { st = await fs.promises.stat(file); } catch (e) { continue; }
+    if (!newest || st.mtimeMs > newest.mtime) newest = { file, mtime: st.mtimeMs, size: st.size };
+  }
+  if (!newest) return;
+  const fh = await fs.promises.open(newest.file, "r");
+  let text;
+  try {
+    const start = Math.max(0, newest.size - CODEX_LIMITS_TAIL_BYTES);
+    const buf = Buffer.alloc(newest.size - start);
+    await fh.read(buf, 0, buf.length, start);
+    text = buf.toString("utf8");
+  } finally {
+    await fh.close();
+  }
+  const lines = text.split("\n");
+  for (let i = lines.length - 1; i >= 0; i--) {
+    if (!lines[i].includes('"rate_limits"')) continue;
+    let d;
+    try { d = JSON.parse(lines[i]); } catch (e) { continue; }
+    const rl = d && d.payload && d.payload.rate_limits;
+    if (!rl) continue;
+    const win = w => w && typeof w.used_percent === "number"
+      ? { percent: Math.round(w.used_percent), windowMinutes: w.window_minutes || null, resetsAt: usageResetMs(w.resets_at) }
+      : null;
+    const next = { primary: win(rl.primary), secondary: win(rl.secondary), plan: rl.plan_type || null, updatedAt: Date.parse(d.timestamp) || newest.mtime };
+    if (JSON.stringify(next) !== JSON.stringify(accountLimits.codex)) {
+      accountLimits.codex = next;
+      broadcast({ type: "limits", limits: accountLimits });
+    }
+    return;
+  }
+}
+
+// 대시보드를 보는 사람이 있을 때만 Claude 한도를 조회한다 (Orca: 15분 주기, 다시 볼 때 5분 넘었으면 갱신)
+function maybeFetchClaudeLimits(onConnect) {
+  if (!wss || !wss.clients.size) return;
+  const age = Date.now() - claudeLimitsState.fetchedAt;
+  if (age >= (onConnect ? CLAUDE_LIMITS_MIN_REFETCH_MS : CLAUDE_LIMITS_POLL_MS)) fetchClaudeLimits();
+}
+
+function startUsageTracking() {
+  const tick = () => {
+    refreshWorkerUsage().catch(e => console.error(`⚠️  Usage refresh failed: ${e.message}`));
+    refreshCodexLimits().catch(e => console.error(`⚠️  Codex limits refresh failed: ${e.message}`));
+    maybeFetchClaudeLimits(false);
+  };
+  tick();
+  setInterval(tick, USAGE_SCAN_MS);
+}
+
 function refreshGitInfo() {
   const byCwd = new Map();
   for (const [id, w] of workers) {
@@ -1749,6 +2254,7 @@ function workerSummary(id, w) {
     aiStateAt: w.aiStateAt || null,
     task: w.task || "",
     git: w.git || null,
+    usage: w.usage || null,
     exitReason: w.exitReason || null,
     startedAt: w.startedAt || null,
     lastOutputAt: w.lastChangeTime || null
@@ -1784,7 +2290,7 @@ function canReceiveMessage(ctx, obj) {
   if (obj.type === "preview_tunnel") {
     return detectedPorts.get(workerId)?.has(Number(obj.port)) || false;
   }
-  return ["spawned", "log", "status", "cwd", "aiState", "task", "git", "title", "presets", "preview_detected", "preview_prompt", "preview_closed"].includes(obj.type);
+  return ["spawned", "log", "status", "cwd", "aiState", "task", "git", "usage", "title", "presets", "preview_detected", "preview_prompt", "preview_closed"].includes(obj.type);
 }
 
 function canAccessWorker(ctx, workerId) {
@@ -2314,6 +2820,11 @@ wss.on('connection', (ws, req) => {
   ws.isAliveSocket = true;
   ws.lastPresence = Date.now();
   ws.on('pong', () => { ws.isAliveSocket = true; });
+  // 계정 한도는 전체 접속에만 보낸다 (공유 링크로 들어온 사람에게는 계정 정보가 아니다)
+  if (ctx.kind === "full") {
+    ws.send(JSON.stringify({ type: "limits", limits: accountLimits }));
+    maybeFetchClaudeLimits(true);
+  }
   if (ctx.kind === "worker") {
     workerResizeOwners.set(String(ctx.workerId), ws);
   }
@@ -2699,6 +3210,7 @@ server.listen(PORT, () => {
   setInterval(syncClaudeSessions, CLAUDE_SESSION_SYNC_MS);
   refreshGitInfo();
   setInterval(refreshGitInfo, GIT_INFO_INTERVAL_MS);
+  startUsageTracking();
   initPush();
   cleanupUploads();
   setInterval(cleanupUploads, UPLOAD_CLEANUP_INTERVAL_MS);

@@ -464,6 +464,63 @@ header h1 {
   display: none;
 }
 
+/* ── 사용량 ── */
+.card-usage {
+  flex-shrink: 0;
+  white-space: nowrap;
+  color: #8b949e;
+  font-variant-numeric: tabular-nums;
+}
+
+.card-usage:empty,
+.tab-ctx:empty,
+.limits-bar:empty {
+  display: none;
+}
+
+.tab-ctx {
+  font-size: 10px;
+  color: #8b949e;
+  font-variant-numeric: tabular-nums;
+}
+
+.usage-ctx[data-level="warn"],
+.tab-ctx[data-level="warn"],
+.limits-item[data-level="warn"] {
+  color: #d29922;
+}
+
+.usage-ctx[data-level="danger"],
+.tab-ctx[data-level="danger"],
+.limits-item[data-level="danger"] {
+  color: #f85149;
+}
+
+.limits-bar {
+  display: flex;
+  gap: 10px;
+  min-width: 0;
+  overflow: hidden;
+  font-size: 11px;
+  color: #8b949e;
+  white-space: nowrap;
+  font-variant-numeric: tabular-nums;
+}
+
+.limits-group {
+  display: inline-flex;
+  gap: 5px;
+}
+
+.limits-name {
+  color: #6e7681;
+}
+
+.limits-item {
+  color: #c9d1d9;
+  cursor: default;
+}
+
 .card-task {
   margin-left: auto;
   min-width: 0;
@@ -1585,6 +1642,15 @@ body[data-scoped-worker] .preset-add {
 /* ── Mobile ────────────────────────────────────────── */
 
 @media (max-width: 768px) {
+  /* 좁은 화면에서는 한도 표시를 헤더 아래 한 줄로 내린다 */
+  header {
+    flex-wrap: wrap;
+    row-gap: 4px;
+  }
+  .limits-bar {
+    order: 10;
+    width: 100%;
+  }
   .toolbar {
     flex-wrap: wrap;
     gap: 6px;

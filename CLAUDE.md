@@ -45,6 +45,8 @@ Config files: `.env` (PORT, DASHBOARD_PASSWORD), `config.json` (basePath, favori
 - Status: `tmux has-session` for liveness check
 - CWD tracking: `tmux display-message -p "#{pane_current_path}"` for real-time path updates
 
+**Usage tracking (`refreshWorkerUsage`, every 10s):** per-worker tokens / estimated API-rate cost / context % from Claude transcripts (`~/.claude/projects/*/<sessionId>.jsonl`, deduped by message id + request id) and Codex rollouts (`~/.codex/sessions/**/rollout-*.jsonl`, matched by cwd + mtime). Account limits: Claude via the OAuth usage endpoint with the Keychain token (every 15 min while a dashboard is open, honoring 429 retry-after); Codex from the newest rollout's `rate_limits`. Pricing tables follow Orca (stablyai/orca).
+
 ## Key Conventions
 
 - Minimal dependencies (only dotenv, ws, web-push)

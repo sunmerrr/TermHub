@@ -115,7 +115,7 @@ function ensureCard(id, cwd, status, logs, cmd, reason, title, sessionName, star
       '<span class="badge' + (status === 'stopped' ? ' stopped' : '') + (status === 'completed' ? ' completed' : '') + '" id="badge-' + id + '">' + status + '</span>' +
       cardActionButtonsHtml(id, status) +
     '</div>' +
-    '<div class="card-cwd"><span class="cwd-path">' + displayPath(cwd) + '</span><span class="card-git" id="git-' + id + '"></span><span class="card-task" id="task-' + id + '"></span></div>' +
+    '<div class="card-cwd"><span class="cwd-path">' + displayPath(cwd) + '</span><span class="card-git" id="git-' + id + '"></span><span class="card-usage" id="usage-' + id + '"></span><span class="card-task" id="task-' + id + '"></span></div>' +
     '<div class="exit-reason" id="exit-reason-' + id + '"></div>' +
     '<div class="logs-wrap">' +
       '<div class="logs" id="logs-' + id + '"></div>' +
@@ -174,7 +174,7 @@ function ensureCard(id, cwd, status, logs, cmd, reason, title, sessionName, star
   tab.dataset.title = title || '';
   tab.dataset.claudeName = claudeName || '';
   var folder = cwd.replace(/\/$/, '').split('/').pop() || cwd;
-  tab.innerHTML = '<span class="tab-dot' + (status === 'stopped' ? ' stopped' : '') + (status === 'completed' ? ' completed' : '') + '" id="tab-dot-' + id + '"></span><span class="tab-label" id="tab-label-' + id + '">#' + id + ' ' + (cmd || 'claude') + ' · ' + folder + '</span><span class="tab-changes" id="tab-changes-' + id + '"></span>';
+  tab.innerHTML = '<span class="tab-dot' + (status === 'stopped' ? ' stopped' : '') + (status === 'completed' ? ' completed' : '') + '" id="tab-dot-' + id + '"></span><span class="tab-label" id="tab-label-' + id + '">#' + id + ' ' + (cmd || 'claude') + ' · ' + folder + '</span><span class="tab-changes" id="tab-changes-' + id + '"></span><span class="tab-ctx" id="tab-ctx-' + id + '"></span>';
   tab.dataset.pinned = (typeof uiState !== 'undefined' && uiState.pinned.map(String).includes(String(id))) ? '1' : '';
   tab.addEventListener('click', () => selectTab(id, true));
   tab.addEventListener('dblclick', e => {
@@ -921,6 +921,120 @@ function updateGitInfo(id, git) {
     el.textContent = changes ? '±' + changes : '';
     el.title = changes ? (git.branch + ' · 변경 파일 ' + changes + '개') : '';
   });
+}
+
+// ── 사용량 (서버 refreshWorkerUsage·계정 한도) ──
+// 비용은 API 단가로 계산한 추정치다 — 구독 요금제에서는 실제 청구액이 아니다
+
+function fmtTokens(n) {
+  if (n >= 1e9) return (n / 1e9).toFixed(1) + 'B';
+  if (n >= 1e6) return (n / 1e6).toFixed(1) + 'M';
+  if (n >= 1e3) return Math.round(n / 1e3) + 'k';
+  return String(n || 0);
+}
+
+function fmtUsd(v) {
+  return v >= 100 ? '$' + Math.round(v).toLocaleString() : '$' + v.toFixed(2);
+}
+
+function usageLevel(percent) {
+  if (percent >= 80) return 'danger';
+  if (percent >= 50) return 'warn';
+  return '';
+}
+
+function updateUsage(id, u) {
+  const parts = [];
+  let title = '';
+  const hasCtx = u && u.ctxPercent !== null && u.ctxPercent !== undefined;
+  if (u) {
+    parts.push(fmtTokens(u.tokens) + ' tok');
+    if (u.costUsd !== null && u.costUsd !== undefined) parts.push('~' + fmtUsd(u.costUsd));
+    title = (u.model || u.provider) +
+      '\n입력 ' + fmtTokens(u.input) + ' · 출력 ' + fmtTokens(u.output) +
+      ' · 캐시 읽기 ' + fmtTokens(u.cacheRead) + (u.cacheWrite ? ' · 캐시 쓰기 ' + fmtTokens(u.cacheWrite) : '') +
+      (u.ctxWindow ? '\n컨텍스트 ' + fmtTokens(u.ctxTokens) + ' / ' + fmtTokens(u.ctxWindow) : '') +
+      '\n비용은 API 단가 기준 추정치예요 (구독 요금제의 실제 청구액이 아님)';
+  }
+  const level = hasCtx ? usageLevel(u.ctxPercent) : '';
+  document.querySelectorAll('#usage-' + id).forEach(el => {
+    el.textContent = parts.join(' · ');
+    // 경고 색은 컨텍스트 부분에만 입힌다
+    if (hasCtx) {
+      el.appendChild(document.createTextNode(' · '));
+      const ctx = document.createElement('span');
+      ctx.className = 'usage-ctx';
+      ctx.dataset.level = level;
+      ctx.textContent = 'ctx ' + u.ctxPercent + '%';
+      el.appendChild(ctx);
+    }
+    el.title = title;
+  });
+  // 탭에는 컨텍스트가 절반을 넘었을 때만 띄운다 — 압축(/compact) 시점을 알 수 있게
+  document.querySelectorAll('#tab-ctx-' + id).forEach(el => {
+    const show = u && u.ctxPercent >= 50;
+    el.textContent = show ? u.ctxPercent + '%' : '';
+    el.title = show ? '컨텍스트 ' + u.ctxPercent + '% 사용' : '';
+    el.dataset.level = show ? level : '';
+  });
+}
+
+function fmtReset(ms) {
+  if (!ms) return '';
+  const d = new Date(ms);
+  return (d.getMonth() + 1) + '/' + d.getDate() + ' ' + String(d.getHours()).padStart(2, '0') + ':' + String(d.getMinutes()).padStart(2, '0') + ' 리셋';
+}
+
+function codexWindowLabel(minutes) {
+  if (minutes === 300) return '5h';
+  if (minutes === 10080) return '주';
+  if (!minutes) return '';
+  return minutes % 1440 === 0 ? (minutes / 1440) + 'd' : Math.round(minutes / 60) + 'h';
+}
+
+function renderLimits(limits) {
+  const bar = document.getElementById('limits-bar');
+  if (!bar) return;
+  bar.innerHTML = '';
+  const group = (name, items, error) => {
+    if (!items.length && !error) return;
+    const g = document.createElement('span');
+    g.className = 'limits-group';
+    const label = document.createElement('span');
+    label.className = 'limits-name';
+    label.textContent = name;
+    g.appendChild(label);
+    if (error) {
+      const e = document.createElement('span');
+      e.className = 'limits-item';
+      e.dataset.level = 'warn';
+      e.textContent = '!';
+      e.title = error;
+      g.appendChild(e);
+    }
+    items.forEach(it => {
+      const s = document.createElement('span');
+      s.className = 'limits-item';
+      s.dataset.level = usageLevel(it.percent);
+      s.textContent = it.label + ' ' + it.percent + '%';
+      s.title = name + ' ' + it.label + ' 한도 ' + it.percent + '% 사용' + (it.resetsAt ? ' · ' + fmtReset(it.resetsAt) : '');
+      g.appendChild(s);
+    });
+    bar.appendChild(g);
+  };
+  const c = limits && limits.claude;
+  if (c) {
+    const items = [];
+    if (c.session) items.push({ label: '5h', percent: c.session.percent, resetsAt: c.session.resetsAt });
+    if (c.weekly) items.push({ label: '주', percent: c.weekly.percent, resetsAt: c.weekly.resetsAt });
+    (c.scoped || []).forEach(s => items.push({ label: s.label, percent: s.percent, resetsAt: s.resetsAt }));
+    group('Claude', items, c.error || null);
+  }
+  const x = limits && limits.codex;
+  if (x) {
+    const items = [x.primary, x.secondary].filter(Boolean).map(w => ({ label: codexWindowLabel(w.windowMinutes), percent: w.percent, resetsAt: w.resetsAt }));
+    group('Codex', items, null);
+  }
 }
 
 // Claude가 pane 제목에 쓰는 작업 요약 — 카드 경로 줄 오른쪽과 탭 툴팁에 보여준다
