@@ -69,8 +69,8 @@ const SPECIAL_KEY_GROUPS = [
   { label: 'Keys', keys: [
     ['esc', ['Escape']], ['↑', ['Up']], ['↓', ['Down']], ['↵', ['Enter'], 'key-enter'],
     ['←', ['Left']], ['→', ['Right']], ['tab', ['Tab']], ['⇧tab', ['BTab'], '', '모드 전환 (Claude: 권한 모드)'],
-    ['home', ['Home']], ['end', ['End']], ['pgup', ['PPage']], ['pgdn', ['NPage']],
-    ['space', ['Space']], ['⌫', ['BSpace']], ['del', ['DC']], ['esc×2', ['Escape', 'Escape'], '', 'Claude: 이전 메시지로 되돌리기']
+    ['home', ['Home']], ['end', ['End']], ['space', ['Space']], ['⌫', ['BSpace']],
+    ['del', ['DC']], ['esc×2', ['Escape', 'Escape'], '', 'Claude: 이전 메시지로 되돌리기']
   ] },
   { label: 'Ctrl', keys: [
     ['⌃c', ['C-c'], '', '중단'], ['⌃c×2', ['C-c', 'C-c'], '', '종료'], ['⌃d', ['C-d'], '', '입력 끝(EOF)·셸 종료'], ['⌃l', ['C-l'], '', '화면 다시 그리기'],
