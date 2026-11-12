@@ -118,6 +118,18 @@ function ensureCard(id, cwd, status, logs, cmd, reason, title, sessionName, star
       '</div>' +
     '</div>';
 
+  if (directTermInput) {
+    // PC는 터미널에 바로 입력하므로 아래 입력 줄을 통째로 숨기고(style.css) 📎·⌨만 헤더로 옮긴다
+    const tools = document.createElement('span');
+    tools.className = 'header-tools';
+    tools.id = 'header-tools-' + id;
+    if (status === 'stopped' || status === 'completed') tools.style.display = 'none';
+    const row = card.querySelector('.input-row');
+    ['.attach-btn', 'input[type=file]', '.toolkit-wrap'].forEach(sel => tools.appendChild(row.querySelector(sel)));
+    const header = card.querySelector('.card-header');
+    header.insertBefore(tools, header.querySelector('.pin-btn'));
+  }
+
   const panel = document.createElement('div');
   panel.className = 'tab-panel';
   panel.dataset.id = id;
@@ -175,7 +187,7 @@ function ensureCard(id, cwd, status, logs, cmd, reason, title, sessionName, star
     document.querySelectorAll('#kill-' + id).forEach(btn => {
       btn.onclick = () => removeWorker(id);
     });
-    document.querySelectorAll('#input-row-' + id).forEach(el => el.style.display = 'none');
+    document.querySelectorAll('#input-row-' + id + ', #header-tools-' + id).forEach(el => el.style.display = 'none');
   }
 
   renderTitle(id, cwd, cmdLabel);
@@ -681,7 +693,7 @@ function updateStatus(id, status, reason) {
         btn.parentElement.insertBefore(reconBtn, btn);
       }
     });
-    document.querySelectorAll('#input-row-' + id).forEach(el => el.style.display = 'none');
+    document.querySelectorAll('#input-row-' + id + ', #header-tools-' + id).forEach(el => el.style.display = 'none');
   }
   if (status === 'running') {
     updateExitReason(id, null);
@@ -694,7 +706,7 @@ function updateStatus(id, status, reason) {
       var reconBtn = btn.parentElement.querySelector('.reconnect-btn');
       if (reconBtn) reconBtn.remove();
     });
-    document.querySelectorAll('#input-row-' + id).forEach(el => el.style.display = '');
+    document.querySelectorAll('#input-row-' + id + ', #header-tools-' + id).forEach(el => el.style.display = '');
   }
   refreshTabPriority();
 }

@@ -605,16 +605,45 @@ header h1 {
   align-items: center;
 }
 
-/* PC(마우스·트랙패드)는 터미널에 바로 입력한다 — 입력창과 Send를 숨기고 📎·⌨만 오른쪽에 둔다 (workers.js directTermInput) */
+/* PC(마우스·트랙패드)는 터미널에 바로 입력한다 — 입력 줄을 숨기고 📎·⌨는 헤더(.header-tools)로 옮긴다 (workers.js directTermInput).
+   상태에 따라 인라인 display를 바꾸므로 !important로 막는다 */
 @media (pointer: fine) {
   .input-row {
-    justify-content: flex-end;
-    padding: 4px 8px;
+    display: none !important;
   }
-  .input-row textarea,
-  .input-row > button[id^="send-"] {
-    display: none;
-  }
+}
+
+.header-tools {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.header-tools .attach-btn,
+.header-tools .toolkit-toggle {
+  background: #21262d;
+  border: 1px solid #30363d;
+  border-radius: 5px;
+  color: #8b949e;
+  font-size: 11px;
+  padding: 2px 8px;
+  line-height: 16px;
+  cursor: pointer;
+}
+
+.header-tools .attach-btn:hover {
+  background: #30363d;
+}
+
+.header-tools .attach-btn[disabled] {
+  cursor: progress;
+  opacity: 0.7;
+}
+
+/* 헤더에서는 위로 열 공간이 없다 — 아래로 연다 */
+.header-tools .toolkit-popup {
+  bottom: auto;
+  top: calc(100% + 6px);
 }
 
 .input-row textarea {
