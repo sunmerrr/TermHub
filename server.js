@@ -2386,7 +2386,8 @@ const server = http.createServer(async (req, res) => {
     }
 
     const html = fs.readFileSync(path.join(__dirname, "index.html"));
-    res.writeHead(200, { "Content-Type": "text/html; charset=utf-8" });
+    // 폰 브라우저·홈 화면 앱이 옛 index.html을 붙잡으면 바뀐 ?v= 스크립트를 영영 받지 못한다 — 매번 새로 확인하게 한다
+    res.writeHead(200, { "Content-Type": "text/html; charset=utf-8", "Cache-Control": "no-cache" });
     return res.end(html);
   }
 
