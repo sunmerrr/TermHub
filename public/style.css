@@ -730,6 +730,21 @@ header h1 {
   cursor: pointer;
 }
 
+/* 입력 방식 토글 — .input-row button(파란 Send)보다 구체적으로 */
+.input-row .input-mode-btn {
+  background: #21262d;
+  border: 1px solid #30363d;
+  color: #8b949e;
+  font-size: 11px;
+  padding: 6px 8px;
+}
+
+.input-row .input-mode-btn.live {
+  color: #3fb950;
+  border-color: #238636;
+  font-weight: 600;
+}
+
 /* ── Prompt Choices ────────────────────────────────── */
 
 .choices {

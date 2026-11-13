@@ -123,8 +123,9 @@ function ensureCard(id, cwd, status, logs, cmd, reason, title, sessionName, star
     '</div>' +
     '<div class="choices" id="choices-' + id + '"></div>' +
     '<div class="input-row" id="input-row-' + id + '"' + (status === 'stopped' || status === 'completed' ? ' style="display:none"' : '') + '>' +
-      '<textarea id="inp-' + id + '" placeholder="Enter command..." rows="1"></textarea>' +
-      '<button id="send-' + id + '">Send</button>' +
+      '<textarea id="inp-' + id + '" placeholder="' + inputPlaceholder() + '" rows="1" autocomplete="off" autocorrect="off" autocapitalize="off" spellcheck="false"></textarea>' +
+      '<button id="send-' + id + '">' + (liveInput ? '⏎' : 'Send') + '</button>' +
+      '<button class="input-mode-btn' + (liveInput ? ' live' : '') + '" id="input-mode-' + id + '" title="' + inputModeTitle() + '">' + (liveInput ? 'LIVE' : '✎') + '</button>' +
       '<button class="attach-btn" id="attach-' + id + '" title="파일 첨부 (붙여넣기·드래그도 가능)">📎</button>' +
       '<input type="file" id="file-' + id + '" multiple hidden>' +
       '<div class="toolkit-wrap">' +
@@ -226,7 +227,8 @@ function ensureCard(id, cwd, status, logs, cmd, reason, title, sessionName, star
   }
   if (reason) updateExitReason(id, reason);
   if (status === 'running') updateExitReason(id, null);
-  restoreDraft(id);
+  // Live 입력에서는 남은 초안이 다음 글자와 함께 터미널로 가 버리므로 모아서 보내기일 때만 되살린다
+  if (!liveInput) restoreDraft(id);
   setTimeout(sendResize, 100);
 }
 
@@ -276,18 +278,27 @@ function bindCard(id, root) {
   if (pinBtn) pinBtn.addEventListener('click', () => togglePin(id));
 
   if (killBtn) killBtn.addEventListener('click', () => killWorker(id));
-  if (sendBtn) sendBtn.addEventListener('click', () => sendInput(id));
+  if (sendBtn) sendBtn.addEventListener('click', () => {
+    if (!liveInput) { sendInput(id); return; }
+    liveSend(id, '\r');
+    if (inp) inp.focus();
+  });
+  const modeBtn = q('#input-mode-' + id);
+  if (modeBtn) modeBtn.addEventListener('click', toggleLiveInput);
+  if (inp) bindLiveInput(id, inp);
   if (inp) {
     // IME 조합 중 Enter 누르면 마지막 글자가 중복되는 크롬 버그 회피:
     // 조합 중일 때는 Enter를 IME 확정용으로 흘려보내고, compositionend에서 전송
     let pendingEnter = false;
     inp.addEventListener('compositionend', () => {
+      if (liveInput) return;
       if (pendingEnter) {
         pendingEnter = false;
         if (inp.value.trim()) { sendInput(id); } else { sendSpecialKey(id, 'Enter'); }
       }
     });
     inp.addEventListener('keydown', e => {
+      if (liveInput) return;
       if (e.key === 'Enter' && !e.shiftKey) {
         if (e.isComposing || e.keyCode === 229) {
           pendingEnter = true;
@@ -298,6 +309,7 @@ function bindCard(id, root) {
       }
     });
     inp.addEventListener('input', () => {
+      if (liveInput) return;
       inp.style.height = 'auto';
       inp.style.height = Math.min(inp.scrollHeight, 120) + 'px';
       saveDraft(id, inp.value);
@@ -1282,6 +1294,10 @@ function appendPathToInput(id, filePath) {
     t.term.focus();
     return;
   }
+  if (liveInput) {
+    liveSend(id, filePath + ' ');
+    return;
+  }
   document.querySelectorAll('#inp-' + id).forEach(inp => {
     const cur = inp.value;
     inp.value = cur + (cur && !/\s$/.test(cur) ? ' ' : '') + filePath + ' ';
@@ -1348,6 +1364,113 @@ function sendInput(id) {
   saveDraft(id, '');
   notifyActive(id);
   apiPost('/api/input', { id, text });
+}
+
+// ── 폰 입력: Live(바로 보내기) / 모아서 보내기 ──
+// Live에서는 아래 입력창이 키보드 손잡이일 뿐이다 — 확정된 글자를 바로 터미널로 보내 앱 자신의 입력줄 하나에만 글이 쌓인다
+// (Orca 모바일의 Live input과 같은 방식). 한글처럼 조합 중인 글자는 확정될 때까지 입력창에만 둔다.
+// 모든 키를 같은 WebSocket으로 보낸다 — Enter만 /api/key(HTTP)로 보내면 앞 글자보다 먼저 도착할 수 있다.
+let liveInput = (() => {
+  try { return localStorage.getItem('liveInput') !== '0'; } catch (e) { console.warn('liveInput load failed', e); return true; }
+})();
+
+function inputPlaceholder() {
+  return liveInput ? '여기에 치면 터미널로 바로 들어가요' : 'Enter command...';
+}
+
+function inputModeTitle() {
+  return liveInput ? '바로 보내기 — 누르면 모아서 보내기로' : '모아서 보내기 — 누르면 바로 보내기로';
+}
+
+function toggleLiveInput() {
+  liveInput = !liveInput;
+  try { localStorage.setItem('liveInput', liveInput ? '1' : '0'); } catch (e) { console.warn('liveInput save failed', e); }
+  document.querySelectorAll('.input-mode-btn').forEach(btn => {
+    btn.classList.toggle('live', liveInput);
+    btn.textContent = liveInput ? 'LIVE' : '✎';
+    btn.title = inputModeTitle();
+  });
+  document.querySelectorAll('.input-row textarea').forEach(inp => {
+    inp.placeholder = inputPlaceholder();
+    // 모아 둔 글을 Live로 바꿔도 지우지 않는다 — 다음 입력 때 함께 터미널로 간다
+    inp.style.height = 'auto';
+    inp.style.height = Math.min(inp.scrollHeight || 30, 120) + 'px';
+  });
+  document.querySelectorAll('.input-row button[id^="send-"]').forEach(btn => { btn.textContent = liveInput ? '⏎' : 'Send'; });
+}
+
+function liveSend(id, data) {
+  if (!data || !ws || ws.readyState !== 1) return;
+  ws.send(JSON.stringify({ type: 'input', id: String(id), data }));
+}
+
+function liveCursorKey(id, code) {
+  const t = terms[id];
+  const app = t && t.term.modes.applicationCursorKeysMode;
+  return (app ? '\x1bO' : '\x1b[') + code;
+}
+
+const LIVE_EMPTY_KEYS = { ArrowUp: 'A', ArrowDown: 'B', ArrowRight: 'C', ArrowLeft: 'D' };
+
+function bindLiveInput(id, inp) {
+  let composing = false;
+  let pendingEnter = false;
+
+  const flush = () => {
+    if (composing || !inp.value) return;
+    const text = inp.value;
+    inp.value = '';
+    inp.style.height = 'auto';
+    const t = terms[id];
+    // 여러 줄 붙여넣기는 xterm.js의 paste로 보낸다 — 앱이 켠 bracketed paste로 감싸 줄마다 실행되지 않게 한다
+    if (/\n/.test(text) && t) t.term.paste(text);
+    else liveSend(id, text);
+  };
+
+  inp.addEventListener('compositionstart', () => { if (liveInput) composing = true; });
+  inp.addEventListener('compositionend', () => {
+    if (!liveInput) return;
+    composing = false;
+    // 브라우저마다 compositionend와 마지막 input 이벤트 순서가 다르다 — 둘 다 끝난 뒤 보낸다
+    setTimeout(() => {
+      flush();
+      if (pendingEnter) {
+        pendingEnter = false;
+        liveSend(id, '\r');
+      }
+    }, 0);
+  });
+  inp.addEventListener('input', e => {
+    if (!liveInput || composing || e.isComposing) return;
+    flush();
+  });
+  inp.addEventListener('keydown', e => {
+    if (!liveInput || e.ctrlKey || e.metaKey || e.altKey) return;
+    if (e.key === 'Enter') {
+      if (composing || e.isComposing || e.keyCode === 229) { pendingEnter = true; return; }
+      e.preventDefault();
+      flush();
+      liveSend(id, '\r');
+      return;
+    }
+    if (inp.value || composing) return;
+    let data = null;
+    if (e.key === 'Backspace') data = '\x7f';
+    else if (e.key === 'Tab') data = '\t';
+    else if (e.key === 'Escape') data = '\x1b';
+    else if (LIVE_EMPTY_KEYS[e.key]) data = liveCursorKey(id, LIVE_EMPTY_KEYS[e.key]);
+    if (!data) return;
+    e.preventDefault();
+    liveSend(id, data);
+  });
+  // 안드로이드 키보드는 지우기를 keydown 229로 보내 위에서 못 잡는다 — 빈 입력창에서 지우기는 beforeinput으로 받는다
+  inp.addEventListener('beforeinput', e => {
+    if (!liveInput || inp.value || composing) return;
+    if (e.inputType !== 'deleteContentBackward') return;
+    e.preventDefault();
+    liveSend(id, '\x7f');
+  });
+  inp.addEventListener('focus', () => { if (liveInput) notifyActive(id); });
 }
 
 function killWorker(id) {
