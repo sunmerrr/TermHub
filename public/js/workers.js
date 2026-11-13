@@ -742,6 +742,18 @@ function createTerminal(id, box) {
     e.stopPropagation();
     uploadFiles(id, files);
   }, true);
+  // xterm.js는 Shift+Enter도 그냥 Enter(\r)로 보내 Claude가 바로 제출한다 — Orca처럼 ESC CR(Alt+Enter)로 보내 줄바꿈으로 받게 한다.
+  // tmux를 거치므로 앱의 kitty·modifyOtherKeys 협상을 볼 수 없어 Orca의 기본값(ESC CR)만 쓴다
+  term.attachCustomKeyEventHandler(e => {
+    if (e.key !== 'Enter' || !e.shiftKey || e.ctrlKey || e.altKey || e.metaKey) return true;
+    if (e.type === 'keydown' && !e.isComposing && ws && ws.readyState === 1) {
+      ws.send(JSON.stringify({ type: 'input', id: String(id), data: '\x1b\r' }));
+    }
+    // xterm.js가 처리하지 않은 키는 문서까지 올라가 app.js 단축키가 Enter를 또 보낸다 — 여기서 끊는다
+    e.preventDefault();
+    e.stopPropagation();
+    return false;
+  });
   term.onData(data => {
     if (TERM_REPLY_RE.test(data)) return;
     if (!ws || ws.readyState !== 1) return;
