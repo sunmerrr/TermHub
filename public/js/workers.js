@@ -70,7 +70,7 @@ const SPECIAL_KEY_GROUPS = [
     ['esc', ['Escape']], ['↑', ['Up']], ['↓', ['Down']], ['↵', ['Enter'], 'key-enter'],
     ['←', ['Left']], ['→', ['Right']], ['tab', ['Tab']], ['⇧tab', ['BTab'], '', '모드 전환 (Claude: 권한 모드)'],
     ['home', ['Home']], ['end', ['End']], ['space', ['Space']], ['⌫', ['BSpace']],
-    ['del', ['DC']], ['esc×2', ['Escape', 'Escape'], '', 'Claude: 이전 메시지로 되돌리기']
+    ['del', ['DC']], ['esc×2', ['Escape', 'Escape'], '', 'Claude: 이전 메시지로 되돌리기'], ['⇧↵', ['M-Enter'], '', '줄바꿈 (Shift+Enter)']
   ] },
   { label: 'Ctrl', keys: [
     ['⌃c', ['C-c'], '', '중단'], ['⌃c×2', ['C-c', 'C-c'], '', '종료'], ['⌃d', ['C-d'], '', '입력 끝(EOF)·셸 종료'], ['⌃l', ['C-l'], '', '화면 다시 그리기'],
@@ -122,10 +122,11 @@ function ensureCard(id, cwd, status, logs, cmd, reason, title, sessionName, star
       '<button class="jump-bottom" id="jump-' + id + '" title="맨 아래로">↓</button>' +
     '</div>' +
     '<div class="choices" id="choices-' + id + '"></div>' +
-    '<div class="input-row" id="input-row-' + id + '"' + (status === 'stopped' || status === 'completed' ? ' style="display:none"' : '') + '>' +
-      '<textarea id="inp-' + id + '" placeholder="' + inputPlaceholder() + '" rows="1" autocomplete="off" autocorrect="off" autocapitalize="off" spellcheck="false"></textarea>' +
-      '<button id="send-' + id + '">' + (liveInput ? '⏎' : 'Send') + '</button>' +
-      '<button class="input-mode-btn' + (liveInput ? ' live' : '') + '" id="input-mode-' + id + '" title="' + inputModeTitle() + '">' + (liveInput ? 'LIVE' : '✎') + '</button>' +
+    '<div class="input-row' + (touchDevice && !composeInput ? ' direct' : '') + '" id="input-row-' + id + '"' + (status === 'stopped' || status === 'completed' ? ' style="display:none"' : '') + '>' +
+      '<span class="direct-hint">터미널 입력줄을 누르면 키보드가 열려요</span>' +
+      '<textarea id="inp-' + id + '" placeholder="Enter command..." rows="1" autocomplete="off" autocorrect="off" autocapitalize="off" spellcheck="false"></textarea>' +
+      '<button id="send-' + id + '">Send</button>' +
+      '<button class="input-mode-btn' + (composeInput ? ' on' : '') + '" id="input-mode-' + id + '" title="입력창 열기/닫기 (긴 글·여러 줄)">✎</button>' +
       '<button class="attach-btn" id="attach-' + id + '" title="파일 첨부 (붙여넣기·드래그도 가능)">📎</button>' +
       '<input type="file" id="file-' + id + '" multiple hidden>' +
       '<div class="toolkit-wrap">' +
@@ -227,8 +228,7 @@ function ensureCard(id, cwd, status, logs, cmd, reason, title, sessionName, star
   }
   if (reason) updateExitReason(id, reason);
   if (status === 'running') updateExitReason(id, null);
-  // Live 입력에서는 남은 초안이 다음 글자와 함께 터미널로 가 버리므로 모아서 보내기일 때만 되살린다
-  if (!liveInput) restoreDraft(id);
+  restoreDraft(id);
   setTimeout(sendResize, 100);
 }
 
@@ -278,27 +278,20 @@ function bindCard(id, root) {
   if (pinBtn) pinBtn.addEventListener('click', () => togglePin(id));
 
   if (killBtn) killBtn.addEventListener('click', () => killWorker(id));
-  if (sendBtn) sendBtn.addEventListener('click', () => {
-    if (!liveInput) { sendInput(id); return; }
-    liveSend(id, '\r');
-    if (inp) inp.focus();
-  });
+  if (sendBtn) sendBtn.addEventListener('click', () => sendInput(id));
   const modeBtn = q('#input-mode-' + id);
-  if (modeBtn) modeBtn.addEventListener('click', toggleLiveInput);
-  if (inp) bindLiveInput(id, inp);
+  if (modeBtn) modeBtn.addEventListener('click', toggleComposeInput);
   if (inp) {
     // IME 조합 중 Enter 누르면 마지막 글자가 중복되는 크롬 버그 회피:
     // 조합 중일 때는 Enter를 IME 확정용으로 흘려보내고, compositionend에서 전송
     let pendingEnter = false;
     inp.addEventListener('compositionend', () => {
-      if (liveInput) return;
       if (pendingEnter) {
         pendingEnter = false;
         if (inp.value.trim()) { sendInput(id); } else { sendSpecialKey(id, 'Enter'); }
       }
     });
     inp.addEventListener('keydown', e => {
-      if (liveInput) return;
       if (e.key === 'Enter' && !e.shiftKey) {
         // 폰 키보드에는 Shift가 없다 — 글이 있으면 Return은 줄바꿈으로 두고 보내기는 Send 버튼으로 한다.
         // 빈 입력창의 Return은 그대로 터미널 Enter다(Claude 확인창 넘기기)
@@ -312,7 +305,6 @@ function bindCard(id, root) {
       }
     });
     inp.addEventListener('input', () => {
-      if (liveInput) return;
       inp.style.height = 'auto';
       inp.style.height = Math.min(inp.scrollHeight, 120) + 'px';
       saveDraft(id, inp.value);
@@ -622,6 +614,35 @@ function fitTermWidth(id) {
 
 window.addEventListener('resize', () => Object.keys(terms).forEach(fitTermWidth));
 
+// 폰도 PC처럼 터미널에 바로 친다 — 입력줄(커서가 있는 줄) 근처를 누를 때만 키보드를 연다.
+// 평소에는 inputmode=none으로 두어 스크롤하려고 만지거나 xterm.js가 스스로 포커스를 가져가도 키보드가 튀어나오지 않게 한다
+const TOUCH_TAP_SLOP = 10;
+const TOUCH_TAP_MS = 400;
+// Claude·Codex 입력 상자는 커서 줄 위아래로 테두리·여러 줄이 있다 — 그 범위까지 입력줄로 본다
+const TOUCH_PROMPT_ROWS = 2;
+
+function tapTerminal(id, term, clientY) {
+  const ta = term.textarea;
+  if (!ta) return;
+  const screen = term.element && term.element.querySelector('.xterm-screen');
+  const b = term.buffer.active;
+  let nearCursor = false;
+  if (screen && term.rows && b.viewportY >= b.baseY) {
+    const r = screen.getBoundingClientRect();
+    const row = Math.floor((clientY - r.top) / (r.height / term.rows));
+    nearCursor = Math.abs(row - b.cursorY) <= TOUCH_PROMPT_ROWS;
+  }
+  if (!nearCursor) {
+    if (document.activeElement === ta) ta.blur();
+    return;
+  }
+  notifyActive(id);
+  // 이미 포커스된 채로 inputmode만 바꾸면 iOS가 키보드를 띄우지 않는다 — 놓았다가 다시 잡는다
+  ta.blur();
+  ta.removeAttribute('inputmode');
+  term.focus();
+}
+
 function bindTouchScroll(id, term, box) {
   let lastY = null;
   let lastT = 0;
@@ -631,6 +652,7 @@ function bindTouchScroll(id, term, box) {
   // 브라우저 기본 팬이 끼어들면 첫 touchmove 뒤로 이벤트가 끊긴다 — 세로는 줄 스크롤, 가로는 아래에서 상자를 직접 민다
   box.style.touchAction = 'none';
   let lastX = 0;
+  let startX = 0, startY = 0, startT = 0;
   // 너비 맞춤 축소(fitTermWidth)가 걸려 있으면 화면에 보이는 줄 높이도 그만큼 작다
   const lineHeight = () => {
     const screen = box.querySelector('.xterm-screen');
@@ -684,7 +706,11 @@ function bindTouchScroll(id, term, box) {
     if (e.touches.length) return;
     release();
     if (lastY === null) return;
+    const tapped = e.type === 'touchend' && Math.abs(lastX - startX) < TOUCH_TAP_SLOP && Math.abs(lastY - startY) < TOUCH_TAP_SLOP &&
+      performance.now() - startT < TOUCH_TAP_MS;
+    const tapY = lastY;
     lastY = null;
+    if (tapped) { tapTerminal(id, term, tapY); return; }
     // 손을 떼기 직전에 멈춰 있었다면 관성 없이 끝낸다
     if (e.type === 'touchcancel' || performance.now() - lastT > 100) return;
     const step = () => {
@@ -703,9 +729,9 @@ function bindTouchScroll(id, term, box) {
     // 다른 기기 크기라 축소돼 보이던 터미널을 만지면 이 폰이 크기를 가져와 글자가 제 크기로 다시 그려진다
     if (termBaseScale(terms[id]) < 1) notifyActive(id);
     if (e.touches.length !== 1) { lastY = null; return; }
-    lastY = e.touches[0].clientY;
-    lastX = e.touches[0].clientX;
-    lastT = performance.now();
+    lastY = startY = e.touches[0].clientY;
+    lastX = startX = e.touches[0].clientX;
+    lastT = startT = performance.now();
     velocity = 0;
     pending = 0;
     target = e.target;
@@ -729,9 +755,14 @@ function createTerminal(id, box) {
   const fit = new FitAddon.FitAddon();
   term.loadAddon(fit);
   term.open(box);
-  // 터치 기기에서는 터미널을 눌러도 화상 키보드를 띄우지 않는다 — 입력은 아래 입력창으로 한다
+  // 터치 기기는 입력줄을 누를 때만 화상 키보드를 연다(tapTerminal) — 스크롤하려고 만질 때 튀어나오지 않게 평소엔 막아 둔다
   if (touchDevice) {
     term.textarea.setAttribute('inputmode', 'none');
+    term.textarea.setAttribute('autocorrect', 'off');
+    term.textarea.setAttribute('autocapitalize', 'off');
+    term.textarea.spellcheck = false;
+    // 키보드가 닫히면 다시 막아 둔다 — 입력줄을 눌러야만 열린다(tapTerminal)
+    term.textarea.addEventListener('blur', () => term.textarea.setAttribute('inputmode', 'none'));
     bindTouchScroll(id, term, box);
   }
   // 입력창이 없는 PC에서도 이미지 붙여넣기로 첨부할 수 있게 한다 — xterm.js보다 먼저 받아야 하므로 capture 단계에서 처리
@@ -1309,8 +1340,8 @@ function appendPathToInput(id, filePath) {
     t.term.focus();
     return;
   }
-  if (liveInput) {
-    liveSend(id, filePath + ' ');
+  if (touchDevice && !composeInput && ws && ws.readyState === 1) {
+    ws.send(JSON.stringify({ type: 'input', id: String(id), data: filePath + ' ' }));
     return;
   }
   document.querySelectorAll('#inp-' + id).forEach(inp => {
@@ -1382,111 +1413,20 @@ function sendInput(id) {
   apiPost('/api/input', text.includes('\n') ? { id, text, mode: 'paste' } : { id, text });
 }
 
-// ── 폰 입력: Live(바로 보내기) / 모아서 보내기 ──
-// Live에서는 아래 입력창이 키보드 손잡이일 뿐이다 — 확정된 글자를 바로 터미널로 보내 앱 자신의 입력줄 하나에만 글이 쌓인다
-// (Orca 모바일의 Live input과 같은 방식). 한글처럼 조합 중인 글자는 확정될 때까지 입력창에만 둔다.
-// 모든 키를 같은 WebSocket으로 보낸다 — Enter만 /api/key(HTTP)로 보내면 앞 글자보다 먼저 도착할 수 있다.
-let liveInput = (() => {
-  try { return localStorage.getItem('liveInput') === '1'; } catch (e) { console.warn('liveInput load failed', e); return false; }
+// ── 폰 입력: 터미널에 바로 / 입력창(✎) ──
+// 폰도 PC처럼 터미널 입력줄을 눌러 바로 친다(bindTouchScroll의 탭 처리). 긴 글·여러 줄은 ✎로 아래 입력창을 열어 모아 보낸다.
+let composeInput = (() => {
+  try { return localStorage.getItem('composeInput') === '1'; } catch (e) { console.warn('composeInput load failed', e); return false; }
 })();
 
-function inputPlaceholder() {
-  return liveInput ? '터미널에 바로 입력' : 'Enter command...';
-}
-
-function inputModeTitle() {
-  return liveInput ? '바로 보내기 — 누르면 모아서 보내기로' : '모아서 보내기 — 누르면 바로 보내기로';
-}
-
-function toggleLiveInput() {
-  liveInput = !liveInput;
-  try { localStorage.setItem('liveInput', liveInput ? '1' : '0'); } catch (e) { console.warn('liveInput save failed', e); }
-  document.querySelectorAll('.input-mode-btn').forEach(btn => {
-    btn.classList.toggle('live', liveInput);
-    btn.textContent = liveInput ? 'LIVE' : '✎';
-    btn.title = inputModeTitle();
-  });
-  document.querySelectorAll('.input-row textarea').forEach(inp => {
-    inp.placeholder = inputPlaceholder();
-    // 모아 둔 글을 Live로 바꿔도 지우지 않는다 — 다음 입력 때 함께 터미널로 간다
-    inp.style.height = 'auto';
-    inp.style.height = Math.min(inp.scrollHeight || 30, 120) + 'px';
-  });
-  document.querySelectorAll('.input-row button[id^="send-"]').forEach(btn => { btn.textContent = liveInput ? '⏎' : 'Send'; });
-}
-
-function liveSend(id, data) {
-  if (!data || !ws || ws.readyState !== 1) return;
-  ws.send(JSON.stringify({ type: 'input', id: String(id), data }));
-}
-
-function liveCursorKey(id, code) {
-  const t = terms[id];
-  const app = t && t.term.modes.applicationCursorKeysMode;
-  return (app ? '\x1bO' : '\x1b[') + code;
-}
-
-const LIVE_EMPTY_KEYS = { ArrowUp: 'A', ArrowDown: 'B', ArrowRight: 'C', ArrowLeft: 'D' };
-
-function bindLiveInput(id, inp) {
-  let composing = false;
-  let pendingEnter = false;
-
-  const flush = () => {
-    if (composing || !inp.value) return;
-    const text = inp.value;
-    inp.value = '';
-    inp.style.height = 'auto';
-    const t = terms[id];
-    // 여러 줄 붙여넣기는 xterm.js의 paste로 보낸다 — 앱이 켠 bracketed paste로 감싸 줄마다 실행되지 않게 한다
-    if (/\n/.test(text) && t) t.term.paste(text);
-    else liveSend(id, text);
-  };
-
-  inp.addEventListener('compositionstart', () => { if (liveInput) composing = true; });
-  inp.addEventListener('compositionend', () => {
-    if (!liveInput) return;
-    composing = false;
-    // 브라우저마다 compositionend와 마지막 input 이벤트 순서가 다르다 — 둘 다 끝난 뒤 보낸다
-    setTimeout(() => {
-      flush();
-      if (pendingEnter) {
-        pendingEnter = false;
-        liveSend(id, '\r');
-      }
-    }, 0);
-  });
-  inp.addEventListener('input', e => {
-    if (!liveInput || composing || e.isComposing) return;
-    flush();
-  });
-  inp.addEventListener('keydown', e => {
-    if (!liveInput || e.ctrlKey || e.metaKey || e.altKey) return;
-    if (e.key === 'Enter') {
-      if (composing || e.isComposing || e.keyCode === 229) { pendingEnter = true; return; }
-      e.preventDefault();
-      flush();
-      liveSend(id, '\r');
-      return;
-    }
-    if (inp.value || composing) return;
-    let data = null;
-    if (e.key === 'Backspace') data = '\x7f';
-    else if (e.key === 'Tab') data = '\t';
-    else if (e.key === 'Escape') data = '\x1b';
-    else if (LIVE_EMPTY_KEYS[e.key]) data = liveCursorKey(id, LIVE_EMPTY_KEYS[e.key]);
-    if (!data) return;
-    e.preventDefault();
-    liveSend(id, data);
-  });
-  // 안드로이드 키보드는 지우기를 keydown 229로 보내 위에서 못 잡는다 — 빈 입력창에서 지우기는 beforeinput으로 받는다
-  inp.addEventListener('beforeinput', e => {
-    if (!liveInput || inp.value || composing) return;
-    if (e.inputType !== 'deleteContentBackward') return;
-    e.preventDefault();
-    liveSend(id, '\x7f');
-  });
-  inp.addEventListener('focus', () => { if (liveInput) notifyActive(id); });
+function toggleComposeInput() {
+  composeInput = !composeInput;
+  try { localStorage.setItem('composeInput', composeInput ? '1' : '0'); } catch (e) { console.warn('composeInput save failed', e); }
+  document.querySelectorAll('.input-row').forEach(row => row.classList.toggle('direct', !composeInput));
+  document.querySelectorAll('.input-mode-btn').forEach(btn => btn.classList.toggle('on', composeInput));
+  if (!composeInput || !activeTab) return;
+  const inp = document.querySelector('.tab-panel.active #inp-' + activeTab);
+  if (inp) inp.focus();
 }
 
 function killWorker(id) {

@@ -739,10 +739,30 @@ header h1 {
   padding: 6px 8px;
 }
 
-.input-row .input-mode-btn.live {
-  color: #3fb950;
-  border-color: #238636;
-  font-weight: 600;
+.input-row .input-mode-btn.on {
+  color: #58a6ff;
+  border-color: #1f6feb;
+}
+
+/* 폰 기본: 터미널에 바로 치므로 입력창·Send는 숨기고 버튼 줄만 남긴다 — ✎로 입력창을 연다 */
+.input-row .direct-hint {
+  display: none;
+}
+
+.input-row.direct .direct-hint {
+  display: block;
+  flex: 1;
+  min-width: 0;
+  color: #6e7681;
+  font-size: 12px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.input-row.direct textarea,
+.input-row.direct > button[id^="send-"] {
+  display: none;
 }
 
 /* ── Prompt Choices ────────────────────────────────── */
