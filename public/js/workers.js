@@ -548,6 +548,91 @@ const TERM_SCAN_THROTTLE_MS = 250;
 // 터치 기기는 xterm.js의 한글 조합이 불안정해 입력창을 그대로 쓴다. 화면 너비가 아니라 입력 방식으로 나눈다
 const directTermInput = !!(window.matchMedia && matchMedia('(pointer: fine)').matches);
 
+// xterm.js의 터치 스크롤은 iOS Safari에서 동작하지 않아(보이는 화면만 보이고 위로 못 올라간다) 한 손가락 스와이프를 직접 줄 스크롤로 바꾼다.
+// 두 손가락은 글자 크기 핀치(bindPinchZoom)에 맡긴다.
+const TOUCH_MOMENTUM_DECAY = 0.95;
+const TOUCH_MOMENTUM_MIN = 0.3;
+
+function bindTouchScroll(term, box) {
+  let lastY = null;
+  let lastT = 0;
+  let velocity = 0;
+  let pending = 0;
+  let raf = 0;
+  // 브라우저 기본 팬이 끼어들면 첫 touchmove 뒤로 이벤트가 끊긴다 — 세로는 줄 스크롤, 가로는 아래에서 상자를 직접 민다
+  box.style.touchAction = 'none';
+  let lastX = 0;
+  const lineHeight = () => {
+    const screen = box.querySelector('.xterm-screen');
+    return screen && term.rows ? screen.clientHeight / term.rows : 16;
+  };
+  // 손가락이 아래로 움직이면(dy > 0) 이전 출력 쪽(위)으로 올라간다
+  const scrollBy = dy => {
+    pending += dy;
+    const lh = lineHeight();
+    const lines = Math.trunc(pending / lh);
+    if (!lines) return;
+    pending -= lines * lh;
+    term.scrollLines(-lines);
+  };
+  const onMove = e => {
+    if (e.touches.length !== 1 || lastY === null) return;
+    const y = e.touches[0].clientY;
+    const now = performance.now();
+    const dy = y - lastY;
+    if (now > lastT) velocity = dy / (now - lastT) * 16;
+    lastY = y;
+    lastT = now;
+    e.preventDefault();
+    e.stopPropagation();
+    // 다른 기기가 크기를 쥐어 터미널이 상자보다 넓을 때만 가로로 밀린다
+    box.scrollLeft -= e.touches[0].clientX - lastX;
+    lastX = e.touches[0].clientX;
+    scrollBy(dy);
+  };
+  let target = null;
+  const release = () => {
+    if (!target) return;
+    target.removeEventListener('touchmove', onMove);
+    target.removeEventListener('touchend', onEnd);
+    target.removeEventListener('touchcancel', onEnd);
+    target = null;
+  };
+  const onEnd = e => {
+    if (e.touches.length) return;
+    release();
+    if (lastY === null) return;
+    lastY = null;
+    // 손을 떼기 직전에 멈춰 있었다면 관성 없이 끝낸다
+    if (e.type === 'touchcancel' || performance.now() - lastT > 100) return;
+    const step = () => {
+      velocity *= TOUCH_MOMENTUM_DECAY;
+      if (Math.abs(velocity) < TOUCH_MOMENTUM_MIN) return;
+      scrollBy(velocity);
+      raf = requestAnimationFrame(step);
+    };
+    raf = requestAnimationFrame(step);
+  };
+  // 터치 이벤트는 손가락이 처음 닿은 요소로만 간다. xterm.js가 스크롤하며 줄 DOM을 새로 그리면 그 요소가 문서에서 빠져
+  // 상자까지 올라오지 않으므로, 이동·종료 리스너는 그 요소에 직접 단다
+  box.addEventListener('touchstart', e => {
+    cancelAnimationFrame(raf);
+    release();
+    if (e.touches.length !== 1) { lastY = null; return; }
+    lastY = e.touches[0].clientY;
+    lastX = e.touches[0].clientX;
+    lastT = performance.now();
+    velocity = 0;
+    pending = 0;
+    target = e.target;
+    target.addEventListener('touchmove', onMove, { passive: false });
+    target.addEventListener('touchend', onEnd);
+    target.addEventListener('touchcancel', onEnd);
+    // xterm.js 자체 터치 스크롤과 겹치지 않게 막는다
+    e.stopPropagation();
+  }, { capture: true, passive: true });
+}
+
 function createTerminal(id, box) {
   if (terms[id] || typeof Terminal === 'undefined') return;
   const term = new Terminal({
@@ -561,7 +646,10 @@ function createTerminal(id, box) {
   term.loadAddon(fit);
   term.open(box);
   // 터치 기기에서는 터미널을 눌러도 화상 키보드를 띄우지 않는다 — 입력은 아래 입력창으로 한다
-  if (window.matchMedia && matchMedia('(pointer: coarse)').matches) term.textarea.setAttribute('inputmode', 'none');
+  if (window.matchMedia && matchMedia('(pointer: coarse)').matches) {
+    term.textarea.setAttribute('inputmode', 'none');
+    bindTouchScroll(term, box);
+  }
   // 입력창이 없는 PC에서도 이미지 붙여넣기로 첨부할 수 있게 한다 — xterm.js보다 먼저 받아야 하므로 capture 단계에서 처리
   box.addEventListener('paste', e => {
     const files = e.clipboardData && e.clipboardData.files;
