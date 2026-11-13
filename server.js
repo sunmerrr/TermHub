@@ -2009,7 +2009,7 @@ function requestTermSeed(id, ctl) {
   if (!w || ctl.seedQueued) return;
   ctl.seedQueued = true;
   let info = null;
-  sendCtl(ctl, `display-message -p -t ${w.sessionName} '#{cursor_x},#{cursor_y},#{cursor_flag},#{alternate_on},#{pane_width},#{pane_height}'`, lines => {
+  sendCtl(ctl, `display-message -p -t ${w.sessionName} '#{cursor_x},#{cursor_y},#{cursor_flag},#{alternate_on},#{pane_width},#{pane_height},#{mouse_standard_flag},#{mouse_button_flag},#{mouse_all_flag},#{mouse_sgr_flag},#{keypad_cursor_flag},#{keypad_flag}'`, lines => {
     info = lines[0] ? lines[0].toString("latin1") : null;
   });
   sendCtl(ctl, `capture-pane -p -e -t ${w.sessionName} -S -${TERM_SEED_HISTORY}`, (lines, failed) => {
@@ -2020,7 +2020,7 @@ function requestTermSeed(id, ctl) {
       console.error(`⚠️  Terminal seed for #${id} failed`);
       return;
     }
-    const [cx, cy, cursorOn, alt, cols, rows] = info.split(",");
+    const [cx, cy, cursorOn, alt, cols, rows, mouseStd, mouseBtn, mouseAll, mouseSgr, cursorKeys, keypad] = info.split(",");
     const rowCount = Number(rows) || lines.length;
     const screen = alt === "1" ? lines.slice(-rowCount) : lines;
     const parts = [];
@@ -2031,6 +2031,14 @@ function requestTermSeed(id, ctl) {
     });
     let tail = `\x1b[0m\x1b[${Number(cy) + 1};${Number(cx) + 1}H`;
     if (cursorOn === "0") tail += "\x1b[?25l";
+    // 앱이 켜 둔 마우스 모드를 되살린다 — 폰 스와이프·PC 휠이 스크롤백 대신 앱(마우스를 쓰는 TUI)으로 가야 한다
+    if (mouseAll === "1") tail += "\x1b[?1003h";
+    else if (mouseBtn === "1") tail += "\x1b[?1002h";
+    else if (mouseStd === "1") tail += "\x1b[?1000h";
+    if (mouseSgr === "1") tail += "\x1b[?1006h";
+    // less·vim처럼 애플리케이션 커서 키 모드를 켠 앱은 ESC O A 형식의 방향키만 알아듣는다
+    if (cursorKeys === "1") tail += "\x1b[?1h";
+    if (keypad === "1") tail += "\x1b=";
     if (BRACKETED_PASTE_COMMANDS.has(isClaudeWorker(w) ? "claude" : w.expectedCmd)) tail += "\x1b[?2004h";
     parts.push(Buffer.from(tail));
     const msg = JSON.stringify({ type: "term", id, cols: Number(cols), rows: rowCount, d: Buffer.concat(parts).toString("base64") });
@@ -2081,10 +2089,11 @@ function detachTermViewer(ws, id) {
 }
 
 // 키 입력은 바이트 그대로 보낸다(send-keys -H) — 방향키·Ctrl 조합·한글이 브라우저에서 만든 그대로 앱에 간다
-function sendTermInput(id, data) {
+// binary: xterm.js onBinary(기본 형식 마우스 신호처럼 0x80 이상 바이트를 글자 하나로 담은 문자열) — UTF-8로 바꾸면 바이트가 깨진다
+function sendTermInput(id, data, binary) {
   const w = workers.get(id);
   if (!w) return;
-  const bytes = Buffer.from(data, "utf8");
+  const bytes = Buffer.from(data, binary ? "latin1" : "utf8");
   const ctl = termClients.get(id);
   for (let i = 0; i < bytes.length; i += TERM_INPUT_CHUNK_BYTES) {
     const hex = Array.from(bytes.subarray(i, i + TERM_INPUT_CHUNK_BYTES), b => b.toString(16).padStart(2, "0"));
@@ -2870,7 +2879,7 @@ wss.on('connection', (ws, req) => {
         }
         claimWorkerSize(id, clientSizes.get(ws), ws);
         applyWorkerSize(id);
-        sendTermInput(id, msg.data);
+        sendTermInput(id, msg.data, msg.binary === true);
         return;
       }
       if (msg.type === 'resize') {

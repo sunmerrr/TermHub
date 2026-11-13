@@ -473,28 +473,50 @@ function applyLogFontSize(px, resize) {
   localStorage.setItem('logFontSize', String(next));
   document.querySelectorAll('.font-size-label').forEach(el => { el.textContent = next + 'px'; });
   Object.values(terms).forEach(t => { t.term.options.fontSize = next; });
+  requestAnimationFrame(() => Object.keys(terms).forEach(fitTermWidth));
   // 글자 크기가 바뀌면 터미널 cols/rows도 달라진다
   if (resize) sendResize();
 }
 
+// 핀치하는 동안은 보이는 모습만 확대·축소하고(매 프레임 글자 크기를 바꾸면 터미널이 계속 다시 줄바꿈된다),
+// 손을 떼면 가장 가까운 글자 크기 단계로 맞춘 뒤 한 번만 크기를 다시 정한다 (Orca 모바일과 같은 방식)
+const LOG_FONT_PRESETS = [8, 10, 12, 14, 16, 18, 20, 24];
+const PINCH_MIN_CHANGE = 0.08;
+
+function snapLogFontSize(px) {
+  return LOG_FONT_PRESETS.reduce((best, p) => Math.abs(p - px) < Math.abs(best - px) ? p : best, LOG_FONT_PRESETS[0]);
+}
+
 function bindPinchZoom(box) {
   let startDist = 0;
-  let startSize = 0;
+  let ratio = 1;
+  let pinched = null;
   const dist = t => Math.hypot(t[0].clientX - t[1].clientX, t[0].clientY - t[1].clientY);
   box.addEventListener('touchstart', e => {
     if (e.touches.length !== 2) return;
     startDist = dist(e.touches);
-    startSize = logFontSize;
+    ratio = 1;
+    pinched = Object.values(terms).find(t => t.box === box) || null;
   }, { passive: true });
   box.addEventListener('touchmove', e => {
     if (e.touches.length !== 2 || !startDist) return;
     e.preventDefault();
-    applyLogFontSize(startSize * (dist(e.touches) / startDist), false);
+    ratio = dist(e.touches) / startDist;
+    // 글자 크기 단계의 양 끝을 넘어서까지 커지거나 작아지지 않게 한다
+    ratio = Math.min(LOG_FONT_MAX / logFontSize, Math.max(LOG_FONT_MIN / logFontSize, ratio));
+    if (pinched) setTermScale(pinched, termBaseScale(pinched) * ratio);
   }, { passive: false });
-  box.addEventListener('touchend', () => {
-    if (!startDist) return;
+  box.addEventListener('touchend', e => {
+    if (!startDist || e.touches.length >= 2) return;
     startDist = 0;
-    applyLogFontSize(logFontSize, true);
+    if (pinched) setTermScale(pinched, termBaseScale(pinched));
+    pinched = null;
+    // 거의 벌리지 않은 핀치는 버튼으로 맞춰 둔 단계 밖 크기(예: 13px)를 바꾸지 않는다
+    if (Math.abs(ratio - 1) < PINCH_MIN_CHANGE) return;
+    const next = snapLogFontSize(logFontSize * ratio);
+    if (next === logFontSize) return;
+    if (navigator.vibrate) navigator.vibrate(10);
+    applyLogFontSize(next, true);
   });
 }
 
@@ -552,8 +574,40 @@ const directTermInput = !!(window.matchMedia && matchMedia('(pointer: fine)').ma
 // 두 손가락은 글자 크기 핀치(bindPinchZoom)에 맡긴다.
 const TOUCH_MOMENTUM_DECAY = 0.95;
 const TOUCH_MOMENTUM_MIN = 0.3;
+const TOUCH_APP_SCROLL_MAX = 32;
 
-function bindTouchScroll(term, box) {
+// 다른 기기가 크기를 쥐고 있어 터미널이 폰 화면보다 넓으면, 가로로 밀지 않아도 다 보이게 화면 너비에 맞춰 축소한다.
+// 크기는 그대로 두고 보이는 모습만 줄이므로 pane이 다시 그려지지 않는다 (Orca 모바일의 fit-scale과 같은 방식)
+const touchDevice = !!(window.matchMedia && matchMedia('(pointer: coarse)').matches);
+
+function termBaseScale(t) {
+  if (!touchDevice || !t.term.element) return 1;
+  const screen = t.box.querySelector('.xterm-screen');
+  if (!screen || !screen.offsetWidth) return 1;
+  const pad = parseFloat(getComputedStyle(t.box).paddingLeft) || 0;
+  const avail = t.box.clientWidth - pad;
+  return screen.offsetWidth > avail + 1 ? avail / screen.offsetWidth : 1;
+}
+
+function setTermScale(t, scale) {
+  const el = t.term.element;
+  if (!el) return;
+  el.style.transformOrigin = '0 0';
+  el.style.transform = scale === 1 ? '' : `scale(${scale})`;
+  // 축소된 뒤에도 원래 크기만큼 스크롤 영역이 남지 않게 한다
+  t.box.style.overflow = scale < 1 ? 'hidden' : '';
+}
+
+function fitTermWidth(id) {
+  const t = terms[id];
+  if (!t || !touchDevice) return;
+  setTermScale(t, 1);
+  setTermScale(t, termBaseScale(t));
+}
+
+window.addEventListener('resize', () => Object.keys(terms).forEach(fitTermWidth));
+
+function bindTouchScroll(id, term, box) {
   let lastY = null;
   let lastT = 0;
   let velocity = 0;
@@ -562,9 +616,20 @@ function bindTouchScroll(term, box) {
   // 브라우저 기본 팬이 끼어들면 첫 touchmove 뒤로 이벤트가 끊긴다 — 세로는 줄 스크롤, 가로는 아래에서 상자를 직접 민다
   box.style.touchAction = 'none';
   let lastX = 0;
+  // 너비 맞춤 축소(fitTermWidth)가 걸려 있으면 화면에 보이는 줄 높이도 그만큼 작다
   const lineHeight = () => {
     const screen = box.querySelector('.xterm-screen');
-    return screen && term.rows ? screen.clientHeight / term.rows : 16;
+    return screen && term.rows ? screen.getBoundingClientRect().height / term.rows : 16;
+  };
+  // 마우스를 쓰는 앱은 휠을 직접 받는다 — 휠 이벤트로 넘겨 xterm.js가 앱이 고른 형식으로 휠 신호를 만들게 한다
+  const scrollApp = lines => {
+    const n = Math.min(Math.abs(lines), TOUCH_APP_SCROLL_MAX);
+    for (let i = 0; i < n; i++) {
+      term.element.dispatchEvent(new WheelEvent('wheel', {
+        deltaY: lines > 0 ? -1 : 1, deltaMode: WheelEvent.DOM_DELTA_LINE,
+        clientX: lastX, clientY: lastY === null ? 0 : lastY, bubbles: true, cancelable: true
+      }));
+    }
   };
   // 손가락이 아래로 움직이면(dy > 0) 이전 출력 쪽(위)으로 올라간다
   const scrollBy = dy => {
@@ -573,7 +638,9 @@ function bindTouchScroll(term, box) {
     const lines = Math.trunc(pending / lh);
     if (!lines) return;
     pending -= lines * lh;
-    term.scrollLines(-lines);
+    if (term.modes.mouseTrackingMode !== 'none') scrollApp(lines);
+    // 마우스를 쓰지 않는 전체 화면 앱에 ↑/↓를 보내면 Codex 같은 채팅 TUI에서는 입력 기록이 넘어간다 — 아무것도 하지 않는다
+    else if (term.buffer.active.type !== 'alternate') term.scrollLines(-lines);
   };
   const onMove = e => {
     if (e.touches.length !== 1 || lastY === null) return;
@@ -618,6 +685,8 @@ function bindTouchScroll(term, box) {
   box.addEventListener('touchstart', e => {
     cancelAnimationFrame(raf);
     release();
+    // 다른 기기 크기라 축소돼 보이던 터미널을 만지면 이 폰이 크기를 가져와 글자가 제 크기로 다시 그려진다
+    if (termBaseScale(terms[id]) < 1) notifyActive(id);
     if (e.touches.length !== 1) { lastY = null; return; }
     lastY = e.touches[0].clientY;
     lastX = e.touches[0].clientX;
@@ -646,9 +715,9 @@ function createTerminal(id, box) {
   term.loadAddon(fit);
   term.open(box);
   // 터치 기기에서는 터미널을 눌러도 화상 키보드를 띄우지 않는다 — 입력은 아래 입력창으로 한다
-  if (window.matchMedia && matchMedia('(pointer: coarse)').matches) {
+  if (touchDevice) {
     term.textarea.setAttribute('inputmode', 'none');
-    bindTouchScroll(term, box);
+    bindTouchScroll(id, term, box);
   }
   // 입력창이 없는 PC에서도 이미지 붙여넣기로 첨부할 수 있게 한다 — xterm.js보다 먼저 받아야 하므로 capture 단계에서 처리
   box.addEventListener('paste', e => {
@@ -662,6 +731,11 @@ function createTerminal(id, box) {
     if (TERM_REPLY_RE.test(data)) return;
     if (!ws || ws.readyState !== 1) return;
     ws.send(JSON.stringify({ type: 'input', id: String(id), data }));
+  });
+  // 기본(X10) 형식 마우스 신호는 onData가 아니라 onBinary로 나온다 — 빠뜨리면 마우스를 쓰는 앱에 휠·클릭이 가지 않는다
+  term.onBinary(data => {
+    if (!ws || ws.readyState !== 1) return;
+    ws.send(JSON.stringify({ type: 'input', id: String(id), data, binary: true }));
   });
   term.onScroll(() => updateTermJump(id, false));
   terms[id] = { term, fit, box, scanTimer: null };
@@ -725,6 +799,7 @@ function writeTermSeed(d) {
   if (!t) return;
   t.term.reset();
   if (d.cols > 0 && d.rows > 0 && (t.term.cols !== d.cols || t.term.rows !== d.rows)) t.term.resize(d.cols, d.rows);
+  fitTermWidth(d.id);
   t.term.write(base64Bytes(d.d), () => {
     t.term.scrollToBottom();
     updateTermJump(d.id, false);
