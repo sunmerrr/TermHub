@@ -300,6 +300,9 @@ function bindCard(id, root) {
     inp.addEventListener('keydown', e => {
       if (liveInput) return;
       if (e.key === 'Enter' && !e.shiftKey) {
+        // 폰 키보드에는 Shift가 없다 — 글이 있으면 Return은 줄바꿈으로 두고 보내기는 Send 버튼으로 한다.
+        // 빈 입력창의 Return은 그대로 터미널 Enter다(Claude 확인창 넘기기)
+        if (touchDevice && inp.value.trim()) return;
         if (e.isComposing || e.keyCode === 229) {
           pendingEnter = true;
           return;
@@ -1363,7 +1366,8 @@ function sendInput(id) {
   inps.forEach(inp => { inp.value = ''; inp.style.height = 'auto'; });
   saveDraft(id, '');
   notifyActive(id);
-  apiPost('/api/input', { id, text });
+  // 여러 줄은 붙여넣기로 보낸다 — 그냥 보내면 줄마다 Enter가 쳐져 줄마다 따로 제출된다
+  apiPost('/api/input', text.includes('\n') ? { id, text, mode: 'paste' } : { id, text });
 }
 
 // ── 폰 입력: Live(바로 보내기) / 모아서 보내기 ──
