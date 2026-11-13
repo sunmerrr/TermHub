@@ -1371,7 +1371,7 @@ function sendInput(id) {
 // (Orca 모바일의 Live input과 같은 방식). 한글처럼 조합 중인 글자는 확정될 때까지 입력창에만 둔다.
 // 모든 키를 같은 WebSocket으로 보낸다 — Enter만 /api/key(HTTP)로 보내면 앞 글자보다 먼저 도착할 수 있다.
 let liveInput = (() => {
-  try { return localStorage.getItem('liveInput') !== '0'; } catch (e) { console.warn('liveInput load failed', e); return true; }
+  try { return localStorage.getItem('liveInput') === '1'; } catch (e) { console.warn('liveInput load failed', e); return false; }
 })();
 
 function inputPlaceholder() {
