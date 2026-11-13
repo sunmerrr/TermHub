@@ -1375,7 +1375,7 @@ let liveInput = (() => {
 })();
 
 function inputPlaceholder() {
-  return liveInput ? '여기에 치면 터미널로 바로 들어가요' : 'Enter command...';
+  return liveInput ? '터미널에 바로 입력' : 'Enter command...';
 }
 
 function inputModeTitle() {
