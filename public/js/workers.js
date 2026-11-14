@@ -70,7 +70,7 @@ const SPECIAL_KEY_GROUPS = [
     ['esc', ['Escape']], ['↑', ['Up']], ['↓', ['Down']], ['↵', ['Enter'], 'key-enter'],
     ['←', ['Left']], ['→', ['Right']], ['tab', ['Tab']], ['⇧tab', ['BTab'], '', '모드 전환 (Claude: 권한 모드)'],
     ['home', ['Home']], ['end', ['End']], ['space', ['Space']], ['⌫', ['BSpace']],
-    ['del', ['DC']], ['esc×2', ['Escape', 'Escape'], '', 'Claude: 이전 메시지로 되돌리기']
+    ['del', ['DC']], ['esc×2', ['Escape', 'Escape'], '', 'Claude: 이전 메시지로 되돌리기'], ['⇧↵', ['M-Enter'], '', '줄바꿈 (Shift+Enter)']
   ] },
   { label: 'Ctrl', keys: [
     ['⌃c', ['C-c'], '', '중단'], ['⌃c×2', ['C-c', 'C-c'], '', '종료'], ['⌃d', ['C-d'], '', '입력 끝(EOF)·셸 종료'], ['⌃l', ['C-l'], '', '화면 다시 그리기'],
@@ -280,6 +280,7 @@ function bindCard(id, root) {
   if (killBtn) killBtn.addEventListener('click', () => killWorker(id));
   if (sendBtn) sendBtn.addEventListener('click', () => {
     if (!liveInput) { sendInput(id); return; }
+    endLiveSession(id);
     liveSend(id, '\r');
     if (inp) inp.focus();
   });
@@ -1298,6 +1299,7 @@ function sendSpecialKey(id, key) {
 
 function sendKeys(id, keys) {
   notifyActive(id);
+  if (liveInput) endLiveSession(id);
   apiPost('/api/key', { id, keys });
 }
 
@@ -1310,6 +1312,7 @@ function appendPathToInput(id, filePath) {
     return;
   }
   if (liveInput) {
+    endLiveSession(id);
     liveSend(id, filePath + ' ');
     return;
   }
@@ -1383,11 +1386,26 @@ function sendInput(id) {
 }
 
 // ── 폰 입력: Live(바로 보내기) / 모아서 보내기 ──
-// Live에서는 아래 입력창이 키보드 손잡이일 뿐이다 — 확정된 글자를 바로 터미널로 보내 앱 자신의 입력줄 하나에만 글이 쌓인다
-// (Orca 모바일의 Live input과 같은 방식). 한글처럼 조합 중인 글자는 확정될 때까지 입력창에만 둔다.
-// 모든 키를 같은 WebSocket으로 보낸다 — Enter만 /api/key(HTTP)로 보내면 앞 글자보다 먼저 도착할 수 있다.
+// Orca 모바일의 Live input을 옮겼다. 입력창의 글을 지우지 않고 그대로 두고, 바뀔 때마다 "지금까지 터미널에 보낸 글"과 비교해
+// 달라진 만큼만 보낸다 — 지워진 글자는 DEL(\x7f)로 지우고 새 글자만 덧붙인다(mirror diff).
+// 입력창을 매번 비우거나(이전 LIVE) xterm.js 입력칸에 바로 치면(탭 입력) 폰 키보드가 들고 있는 단어 문맥과 어긋나
+// 고친 단어를 띄어쓰기로 확정할 때 앞 글이 통째로 다시 들어간다.
+// 조합 중인 글자(한글 등)는 확정될 때까지 보내지 않고 들고 있는다(held). 모든 바이트는 같은 WebSocket으로 보내 순서를 지킨다.
+const LIVE_HELD_COMMIT_MS = 300; // 조합 여부를 알려 주지 않는 키보드(안드로이드)에서 들고 있던 글자를 확정하는 대기 시간
+const LIVE_DEL = '\x7f';
+// 입력창에 글이 있을 때는 입력창 안에서 처리한다(diff가 터미널에 반영) — 그대로 터미널에 보내면 두 번 지워진다
+const LIVE_FIELD_LOCAL_KEYS = new Set(['Backspace', 'Delete', 'ArrowLeft', 'ArrowRight', 'Home', 'End']);
+const LIVE_EMPTY_KEYS = {
+  Backspace: () => LIVE_DEL, Delete: () => '\x1b[3~', Tab: () => '\t', Escape: () => '\x1b',
+  ArrowUp: id => liveCursorKey(id, 'A'), ArrowDown: id => liveCursorKey(id, 'B'),
+  ArrowRight: id => liveCursorKey(id, 'C'), ArrowLeft: id => liveCursorKey(id, 'D'),
+  Home: id => liveCursorKey(id, 'H'), End: id => liveCursorKey(id, 'F')
+};
+const isAndroid = /Android/i.test(navigator.userAgent);
+const liveStates = {};
+
 let liveInput = (() => {
-  try { return localStorage.getItem('liveInput') === '1'; } catch (e) { console.warn('liveInput load failed', e); return false; }
+  try { return localStorage.getItem('liveMirrorInput') !== '0'; } catch (e) { console.warn('liveInput load failed', e); return true; }
 })();
 
 function inputPlaceholder() {
@@ -1395,12 +1413,14 @@ function inputPlaceholder() {
 }
 
 function inputModeTitle() {
-  return liveInput ? '바로 보내기 — 누르면 모아서 보내기로' : '모아서 보내기 — 누르면 바로 보내기로';
+  return liveInput ? '바로 입력 — 누르면 모아서 보내기로' : '모아서 보내기 — 누르면 바로 입력으로';
 }
 
 function toggleLiveInput() {
   liveInput = !liveInput;
-  try { localStorage.setItem('liveInput', liveInput ? '1' : '0'); } catch (e) { console.warn('liveInput save failed', e); }
+  try { localStorage.setItem('liveMirrorInput', liveInput ? '1' : '0'); } catch (e) { console.warn('liveInput save failed', e); }
+  // 모드를 바꾸면 입력창이 비어 있는 상태에서 새로 시작한다 — 바로 입력 중이던 글은 이미 터미널에 있다
+  Object.keys(liveStates).forEach(id => endLiveSession(id));
   document.querySelectorAll('.input-mode-btn').forEach(btn => {
     btn.classList.toggle('live', liveInput);
     btn.textContent = liveInput ? 'LIVE' : '✎';
@@ -1408,7 +1428,6 @@ function toggleLiveInput() {
   });
   document.querySelectorAll('.input-row textarea').forEach(inp => {
     inp.placeholder = inputPlaceholder();
-    // 모아 둔 글을 Live로 바꿔도 지우지 않는다 — 다음 입력 때 함께 터미널로 간다
     inp.style.height = 'auto';
     inp.style.height = Math.min(inp.scrollHeight || 30, 120) + 'px';
   });
@@ -1426,65 +1445,155 @@ function liveCursorKey(id, code) {
   return (app ? '\x1bO' : '\x1b[') + code;
 }
 
-const LIVE_EMPTY_KEYS = { ArrowUp: 'A', ArrowDown: 'B', ArrowRight: 'C', ArrowLeft: 'D' };
+function liveState(id) {
+  return liveStates[id] || (liveStates[id] = { sent: '', held: '', timer: null });
+}
+
+function liveConjoiningJamo(cp) {
+  return (cp >= 0x1100 && cp <= 0x11ff) || (cp >= 0xa960 && cp <= 0xa97c) || (cp >= 0xd7b0 && cp <= 0xd7c6) || (cp >= 0xd7cb && cp <= 0xd7fb);
+}
+
+// Orca computeTerminalLiveMirrorStep — composing: true/false는 브라우저가 알려 준 조합 여부, undefined는 모름(안드로이드)
+function liveMirrorStep(sentText, fieldText, commitHeld, composing) {
+  const field = Array.from(fieldText);
+  const sent = Array.from(sentText);
+  let stable = 0;
+  while (stable < sent.length && stable < field.length && sent[stable] === field[stable]) stable++;
+  let held = 0;
+  if (!commitHeld) {
+    if (composing === true) {
+      held = field.length - stable;
+    } else if (composing === false) {
+      // iOS 천지인처럼 조합 표시 없이 낱자모를 고쳐 쓰는 키보드 — 끝의 낱자모는 들고 있는다
+      while (held < field.length - stable && liveConjoiningJamo(field[field.length - 1 - held].codePointAt(0))) held++;
+    } else {
+      // 조합 여부를 모르면 끝의 비ASCII 글자를 들고 있는다 — 영문은 바로 보이고 한글은 확정 뒤에 간다
+      while (held < field.length && field[field.length - 1 - held].codePointAt(0) > 0x7f) held++;
+      held = Math.min(held, field.length - stable);
+    }
+  }
+  const target = field.slice(0, field.length - held);
+  const kept = Math.min(stable, target.length);
+  return {
+    erase: sent.length - kept,
+    append: target.slice(kept).join(''),
+    sent: target.join(''),
+    held: field.slice(field.length - held).join('')
+  };
+}
+
+function liveApply(id, fieldText, commitHeld, composing) {
+  const st = liveState(id);
+  const step = liveMirrorStep(st.sent, fieldText.replace(/[–—]/g, '--'), commitHeld, composing);
+  st.sent = step.sent;
+  st.held = step.held;
+  clearTimeout(st.timer);
+  st.timer = null;
+  if (step.held && composing === undefined) {
+    st.timer = setTimeout(() => {
+      st.timer = null;
+      liveApply(id, st.sent + st.held, true);
+    }, LIVE_HELD_COMMIT_MS);
+  }
+  if (step.erase) liveSend(id, LIVE_DEL.repeat(step.erase));
+  if (!step.append) return;
+  const t = terms[id];
+  // 여러 줄 붙여넣기는 xterm.js paste로 보낸다 — 앱이 켠 bracketed paste로 감싸 줄마다 제출되지 않게 하고, 입력창은 새로 시작한다
+  if (/\n/.test(step.append) && t) {
+    t.term.paste(step.append);
+    endLiveSession(id);
+    return;
+  }
+  liveSend(id, step.append);
+}
+
+// 들고 있던 조합 글자를 보내고 입력창을 비운다 — 이미 보낸 글은 터미널에 그대로 남는다
+function endLiveSession(id) {
+  const st = liveStates[id];
+  if (!st) return;
+  if (st.held) liveApply(id, st.sent + st.held, true);
+  clearTimeout(st.timer);
+  st.sent = '';
+  st.held = '';
+  st.timer = null;
+  document.querySelectorAll('#inp-' + id).forEach(inp => {
+    inp.value = '';
+    inp.style.height = 'auto';
+  });
+}
 
 function bindLiveInput(id, inp) {
   let composing = false;
   let pendingEnter = false;
-
-  const flush = () => {
-    if (composing || !inp.value) return;
-    const text = inp.value;
-    inp.value = '';
+  const submit = () => {
+    endLiveSession(id);
+    liveSend(id, '\r');
+  };
+  const sync = isComposing => {
     inp.style.height = 'auto';
-    const t = terms[id];
-    // 여러 줄 붙여넣기는 xterm.js의 paste로 보낸다 — 앱이 켠 bracketed paste로 감싸 줄마다 실행되지 않게 한다
-    if (/\n/.test(text) && t) t.term.paste(text);
-    else liveSend(id, text);
+    inp.style.height = Math.min(inp.scrollHeight || 30, 120) + 'px';
+    liveApply(id, inp.value, false, isAndroid ? undefined : isComposing);
   };
 
   inp.addEventListener('compositionstart', () => { if (liveInput) composing = true; });
   inp.addEventListener('compositionend', () => {
     if (!liveInput) return;
     composing = false;
-    // 브라우저마다 compositionend와 마지막 input 이벤트 순서가 다르다 — 둘 다 끝난 뒤 보낸다
-    setTimeout(() => {
-      flush();
-      if (pendingEnter) {
-        pendingEnter = false;
-        liveSend(id, '\r');
-      }
+    // 확정의 마지막 input 이벤트는 아직 조합 중으로 오고 뒤따르는 이벤트가 없다 — 여기서 확정으로 처리한다
+    sync(false);
+    // 조합 중에 누른 Return은 확정 뒤에 한 번만 보낸다 — 뒤따르는 줄바꿈 입력(beforeinput)은 위에서 막는다
+    if (pendingEnter) setTimeout(() => {
+      if (!pendingEnter) return;
+      pendingEnter = false;
+      submit();
     }, 0);
   });
   inp.addEventListener('input', e => {
-    if (!liveInput || composing || e.isComposing) return;
-    flush();
+    if (!liveInput) return;
+    sync(composing || e.isComposing);
+  });
+  // 폰 키보드의 Return은 keydown 없이 줄바꿈 입력으로만 오기도 한다 — 줄바꿈을 막고 Enter로 보낸다
+  inp.addEventListener('beforeinput', e => {
+    if (!liveInput) return;
+    if (e.inputType === 'insertLineBreak' || e.inputType === 'insertParagraph') {
+      e.preventDefault();
+      if (composing || pendingEnter) { pendingEnter = true; return; }
+      submit();
+      return;
+    }
+    // 빈 입력창의 지우기는 터미널로 — 안드로이드는 지우기를 keydown 229로 보내 아래 keydown에서 못 잡는다
+    if (e.inputType === 'deleteContentBackward' && !inp.value && !liveState(id).sent) {
+      e.preventDefault();
+      liveSend(id, LIVE_DEL);
+    }
   });
   inp.addEventListener('keydown', e => {
     if (!liveInput || e.ctrlKey || e.metaKey || e.altKey) return;
     if (e.key === 'Enter') {
-      if (composing || e.isComposing || e.keyCode === 229) { pendingEnter = true; return; }
+      if (e.shiftKey) {
+        // 하드웨어 키보드의 Shift+Enter — PC 터미널과 같은 줄바꿈 신호(ESC CR)
+        e.preventDefault();
+        endLiveSession(id);
+        liveSend(id, '\x1b\r');
+        return;
+      }
+      if (composing || e.isComposing) { pendingEnter = true; return; }
+      // 키 정보 없는 Return(안드로이드 229)은 뒤따르는 줄바꿈 입력(beforeinput)에서 보낸다
+      if (e.keyCode === 229) return;
       e.preventDefault();
-      flush();
-      liveSend(id, '\r');
+      submit();
       return;
     }
-    if (inp.value || composing) return;
-    let data = null;
-    if (e.key === 'Backspace') data = '\x7f';
-    else if (e.key === 'Tab') data = '\t';
-    else if (e.key === 'Escape') data = '\x1b';
-    else if (LIVE_EMPTY_KEYS[e.key]) data = liveCursorKey(id, LIVE_EMPTY_KEYS[e.key]);
-    if (!data) return;
+    if (composing || e.isComposing || e.keyCode === 229) return;
+    const st = liveState(id);
+    const atEnd = inp.selectionStart === inp.value.length && inp.selectionEnd === inp.value.length;
+    if ((st.sent || st.held || inp.value) && (LIVE_FIELD_LOCAL_KEYS.has(e.key) && !((e.key === 'ArrowRight' || e.key === 'End') && atEnd))) return;
+    const make = LIVE_EMPTY_KEYS[e.key];
+    if (!make) return;
     e.preventDefault();
-    liveSend(id, data);
-  });
-  // 안드로이드 키보드는 지우기를 keydown 229로 보내 위에서 못 잡는다 — 빈 입력창에서 지우기는 beforeinput으로 받는다
-  inp.addEventListener('beforeinput', e => {
-    if (!liveInput || inp.value || composing) return;
-    if (e.inputType !== 'deleteContentBackward') return;
-    e.preventDefault();
-    liveSend(id, '\x7f');
+    // 위·아래(이전 입력 불러오기)·Tab 같은 키는 입력창 글과 상관없이 터미널이 처리한다 — 입력창은 새로 시작한다
+    if (st.sent || st.held) endLiveSession(id);
+    liveSend(id, make(id));
   });
   inp.addEventListener('focus', () => { if (liveInput) notifyActive(id); });
 }
