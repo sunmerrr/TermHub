@@ -60,10 +60,14 @@ EOF
   echo "✅ .env created"
 fi
 
-# 5. Setup config.json
-if [ -f config.json ]; then
-  echo "⏭️  config.json already exists, skipping"
+# 5. 이 컴퓨터 설정 — .env에 넣는다 (예전 config.json도 읽지만 .env 값이 우선)
+if grep -q "^BASE_PATH=" .env 2>/dev/null; then
+  echo "⏭️  BASE_PATH already in .env, skipping"
 else
+  default_name="$(scutil --get ComputerName 2>/dev/null || hostname)"
+  read -p "🖥️  Name shown on the login screen (default: $default_name): " host_name
+  host_name=${host_name:-$default_name}
+
   default_path="$HOME"
   read -p "📂 Base path for terminals (default: $default_path): " base_path
   base_path=${base_path:-$default_path}
@@ -71,14 +75,13 @@ else
   read -p "⚡ Default command (default: claude): " default_cmd
   default_cmd=${default_cmd:-claude}
 
-  cat > config.json << EOF
-{
-  "basePath": "$base_path",
-  "favorites": [],
-  "defaultCommand": "$default_cmd"
-}
+  cat >> .env << EOF
+TERMHUB_NAME=$host_name
+BASE_PATH=$base_path
+DEFAULT_COMMAND=$default_cmd
+FAVORITES=
 EOF
-  echo "✅ config.json created"
+  echo "✅ Machine settings added to .env"
 fi
 
 # 6. Setup launchd (background service)

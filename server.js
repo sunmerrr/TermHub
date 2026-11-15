@@ -112,9 +112,37 @@ function tmuxExec(args) {
   }
 }
 
+// 컴퓨터마다 다른 값은 .env로 둔다. 예전 설치의 config.json도 읽되 .env 값이 우선한다
 function loadConfig() {
   const configPath = path.join(__dirname, "config.json");
-  return fs.existsSync(configPath) ? JSON.parse(fs.readFileSync(configPath, "utf8")) : {};
+  const config = fs.existsSync(configPath) ? JSON.parse(fs.readFileSync(configPath, "utf8")) : {};
+  if (process.env.TERMHUB_NAME) config.name = process.env.TERMHUB_NAME;
+  if (process.env.BASE_PATH) config.basePath = process.env.BASE_PATH;
+  if (process.env.DEFAULT_COMMAND) config.defaultCommand = process.env.DEFAULT_COMMAND;
+  if (process.env.FAVORITES) config.favorites = process.env.FAVORITES.split(",").map(p => p.trim()).filter(Boolean);
+  return config;
+}
+
+// 로그인 화면·탭 제목에 어느 컴퓨터의 TermHub인지 보여 준다 — .env의 TERMHUB_NAME, 없으면 컴퓨터 이름(맥: 시스템 설정의 이름)
+let computerNameCache = null;
+function hostLabel() {
+  const name = loadConfig().name;
+  if (typeof name === "string" && name.trim()) return name.trim();
+  if (computerNameCache === null) {
+    computerNameCache = os.hostname().replace(/\.local$/, "");
+    if (process.platform === "darwin") {
+      try {
+        computerNameCache = execFileSync("scutil", ["--get", "ComputerName"], { encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] }).trim() || computerNameCache;
+      } catch (e) {
+        console.error(`⚠️  Computer name lookup failed, using hostname: ${e.message}`);
+      }
+    }
+  }
+  return computerNameCache;
+}
+
+function escapeHtmlText(text) {
+  return String(text).replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;");
 }
 
 function loadState() {
@@ -2385,7 +2413,7 @@ const server = http.createServer(async (req, res) => {
       return res.end();
     }
 
-    const html = fs.readFileSync(path.join(__dirname, "index.html"));
+    const html = fs.readFileSync(path.join(__dirname, "index.html"), "utf8").replace(/\{\{HOST_LABEL\}\}/g, escapeHtmlText(hostLabel()));
     // 폰 브라우저·홈 화면 앱이 옛 index.html을 붙잡으면 바뀐 ?v= 스크립트를 영영 받지 못한다 — 매번 새로 확인하게 한다
     res.writeHead(200, { "Content-Type": "text/html; charset=utf-8", "Cache-Control": "no-cache" });
     return res.end(html);
@@ -2409,9 +2437,7 @@ const server = http.createServer(async (req, res) => {
     const ctx = authContext(req);
     if (!ctx) return json(res, 401, { error: "unauthorized" });
     if (ctx.kind === "worker") return json(res, 200, { scopedWorkerId: ctx.workerId });
-    const configPath = path.join(__dirname, "config.json");
-    const config = fs.existsSync(configPath) ? JSON.parse(fs.readFileSync(configPath, "utf8")) : {};
-    return json(res, 200, config);
+    return json(res, 200, loadConfig());
   }
 
   const ctx = authContext(req);

@@ -49,7 +49,7 @@ npm run setup
 1. Node.js, tmux 확인 (없으면 Homebrew로 tmux 설치)
 2. `npm install` 실행
 3. `.env` 생성 — 비밀번호와 포트 입력
-4. `config.json` 생성 — 기본 경로와 기본 명령어 입력
+4. `.env`에 이 컴퓨터 설정 추가 — 로그인 화면에 보일 이름, 기본 경로, 기본 명령어 입력
 5. macOS launchd 서비스 등록 — 부팅 시 자동 시작, 크래시 시 자동 재시작
 
 설치 후 TermHub는 백그라운드에서 실행됩니다. 서비스 관리:
@@ -66,8 +66,7 @@ cat /tmp/termhub.log                                                # 로그 확
 
 ```bash
 npm install
-cp config.example.json config.json   # basePath, favorites, defaultCommand 수정
-echo -e "PORT=8081\nDASHBOARD_PASSWORD=yourpass" > .env
+cp .env.example .env   # DASHBOARD_PASSWORD, TERMHUB_NAME, BASE_PATH, FAVORITES, DEFAULT_COMMAND 등 수정
 node server.js
 ```
 
@@ -183,9 +182,10 @@ termhub/
 │       ├── ws.js          # WebSocket & API 통신
 │       ├── workers.js     # 워커 카드 UI & 액션
 │       └── app.js         # 초기화 & 이벤트 바인딩
-├── config.json            # 사용자 설정 (gitignored)
-├── config.example.json    # 설정 템플릿
-├── .env                   # 환경 변수 (gitignored)
+├── config.json            # 예전 사용자 설정, 아직 읽음 (gitignored) — .env 값이 우선
+├── config.example.json    # 예전 설정 템플릿
+├── .env                   # 컴퓨터별 설정 (gitignored)
+├── .env.example           # 모든 설정과 기본값
 ├── .gitignore
 ├── package.json
 ├── README.md              # English

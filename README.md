@@ -51,7 +51,7 @@ The setup script will:
 1. Check for Node.js and tmux (installs tmux via Homebrew if missing)
 2. Run `npm install`
 3. Create `.env` — prompts for password and port
-4. Create `config.json` — prompts for base path and default command
+4. Add machine settings to `.env` — prompts for the name shown on the login screen, base path and default command
 5. Register as a macOS launchd service — starts automatically on boot, restarts on crash
 
 After setup, TermHub is running in the background. Manage the service with:
@@ -68,8 +68,7 @@ If you prefer to set up manually instead of using the setup script:
 
 ```bash
 npm install
-cp config.example.json config.json   # Edit basePath, favorites, defaultCommand
-echo -e "PORT=8081\nDASHBOARD_PASSWORD=yourpass" > .env
+cp .env.example .env   # Edit DASHBOARD_PASSWORD, TERMHUB_NAME, BASE_PATH, FAVORITES, DEFAULT_COMMAND …
 node server.js
 ```
 
@@ -185,9 +184,10 @@ termhub/
 │       ├── ws.js          # WebSocket & API communication
 │       ├── workers.js     # Worker card UI & actions
 │       └── app.js         # Init & event binding
-├── config.json            # User config (gitignored)
-├── config.example.json    # Config template
-├── .env                   # Environment variables (gitignored)
+├── config.json            # Legacy user config, still read (gitignored) — .env wins
+├── config.example.json    # Legacy config template
+├── .env                   # Per-machine settings (gitignored)
+├── .env.example           # Every setting with its default
 ├── .gitignore
 ├── package.json
 └── README.md

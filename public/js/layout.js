@@ -2,6 +2,8 @@
 
 // 레이아웃 전환 UI를 없앴다 — 예전에 저장된 'split' 값이 남아 있어도 빠져나올 방법이 없으므로 항상 tab으로 고정
 let layout = 'tab';
+// 서버가 넣어 준 "TermHub · 컴퓨터 이름" — 대기 중인 워커 수만 앞에 붙인다
+const BASE_TITLE = document.title;
 let activeTab = null;
 
 function setLayout(mode) {
@@ -42,7 +44,7 @@ function refreshTabPriority() {
     tab.style.order = isPinned ? -2 : (isWaiting ? -1 : 0);
     if (isWaiting) waiting++;
   });
-  document.title = waiting ? '(' + waiting + ') TermHub' : 'TermHub';
+  document.title = waiting ? '(' + waiting + ') ' + BASE_TITLE : BASE_TITLE;
 }
 
 // ── Shared UI state (서버 저장: 탭 순서·핀·마지막 활성 탭) ──

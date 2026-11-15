@@ -11,8 +11,7 @@ Thanks for your interest in improving TermHub.
 
 ```bash
 npm install
-cp config.example.json config.json
-echo -e "PORT=8081\nDASHBOARD_PASSWORD=yourpass" > .env
+cp .env.example .env   # set DASHBOARD_PASSWORD
 npm start
 ```
 

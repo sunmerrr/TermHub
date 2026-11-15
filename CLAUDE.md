@@ -16,7 +16,7 @@ node server.js       # Start server (default port: 8080)
 brew install tmux
 ```
 
-Config files: `.env` (PORT, DASHBOARD_PASSWORD), `config.json` (basePath, favorites, defaultCommand) — both gitignored. Copy `config.example.json` to create `config.json`.
+Config: everything that can differ per machine lives in `.env` (see `.env.example`: PORT, DASHBOARD_PASSWORD, TERMHUB_NAME, BASE_PATH, DEFAULT_COMMAND, FAVORITES, …). A legacy `config.json` is still read; `.env` values win. Both are gitignored.
 
 ## Architecture
 
