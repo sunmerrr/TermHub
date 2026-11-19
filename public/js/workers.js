@@ -1587,6 +1587,13 @@ function bindLiveInput(id, inp) {
     endLiveSession(id);
     liveSend(id, '\r');
   };
+  // 폰 키보드에는 Shift가 없다 — 모아서 보내기와 같게, 글이 있으면 Return은 줄바꿈(ESC CR, PC의 Shift+Enter)이고 보내기는 ⏎ 버튼이다.
+  // 빈 입력창의 Return은 그대로 터미널 Enter다(Claude 확인창 넘기기, 줄바꿈 뒤 한 번 더 누르면 보내기)
+  const pressReturn = () => {
+    if (!touchDevice || !inp.value.trim()) { submit(); return; }
+    endLiveSession(id);
+    liveSend(id, '\x1b\r');
+  };
   const sync = isComposing => {
     inp.style.height = 'auto';
     inp.style.height = Math.min(inp.scrollHeight || 30, 120) + 'px';
@@ -1603,20 +1610,20 @@ function bindLiveInput(id, inp) {
     if (pendingEnter) setTimeout(() => {
       if (!pendingEnter) return;
       pendingEnter = false;
-      submit();
+      pressReturn();
     }, 0);
   });
   inp.addEventListener('input', e => {
     if (!liveInput || dropEndedLiveEcho(id, inp)) return;
     sync(composing || e.isComposing);
   });
-  // 폰 키보드의 Return은 keydown 없이 줄바꿈 입력으로만 오기도 한다 — 줄바꿈을 막고 Enter로 보낸다
+  // 폰 키보드의 Return은 keydown 없이 줄바꿈 입력으로만 오기도 한다 — 입력창 줄바꿈은 막고 Return으로 처리한다
   inp.addEventListener('beforeinput', e => {
     if (!liveInput) return;
     if (e.inputType === 'insertLineBreak' || e.inputType === 'insertParagraph') {
       e.preventDefault();
       if (composing || pendingEnter) { pendingEnter = true; return; }
-      submit();
+      pressReturn();
       return;
     }
     // 빈 입력창의 지우기는 터미널로 — 안드로이드는 지우기를 keydown 229로 보내 아래 keydown에서 못 잡는다
@@ -1642,7 +1649,7 @@ function bindLiveInput(id, inp) {
       // 키 정보 없는 Return(안드로이드 229)은 뒤따르는 줄바꿈 입력(beforeinput)에서 보낸다
       if (e.keyCode === 229) return;
       e.preventDefault();
-      submit();
+      pressReturn();
       return;
     }
     if (composing || e.isComposing || e.keyCode === 229) return;

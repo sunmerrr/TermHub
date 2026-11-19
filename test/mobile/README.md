@@ -6,7 +6,7 @@ npm run test:mobile
 
 Taps the real Gboard keys in the emulator's Chrome and, after every step, checks that the
 **input field text equals what the terminal received** (DEL applied as erase). Covers typo fixes,
-Gboard suggestion swaps, erasing past a space, Korean composition and Enter.
+Gboard suggestion swaps, erasing past a space, Korean composition, Return as a line break and Return on an empty field as Enter.
 
 ## What it does
 

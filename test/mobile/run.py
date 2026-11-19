@@ -61,13 +61,15 @@ def ui_bounds(resource_id):
 
 
 def terminal_line():
-    """기록된 입력 바이트에 DEL을 적용해 [엔터로 끝난 줄들, 아직 입력 중인 줄]을 만든다"""
+    """기록된 입력 바이트에 DEL을 적용해 [엔터로 끝난 줄들, 아직 입력 중인 줄]을 만든다. 줄바꿈(ESC CR)은 줄 안의 \n이다"""
     raw = open(LOG, 'rb').read().decode('utf-8', 'replace')
     lines, cur = [], []
     for ch in raw:
         if ch == '\x7f':
             if cur:
                 cur.pop()
+        elif ch == '\r' and cur and cur[-1] == '\x1b':
+            cur[-1] = '\n'
         elif ch == '\r':
             lines.append(''.join(cur))
             cur = []
@@ -87,6 +89,7 @@ def check(name, expect_field=None, wait=1.0):
     # 안드로이드는 조합 상태를 알 수 없어 끝 글자를 300ms 붙잡았다 보낸다 — 넉넉히 기다린다
     time.sleep(wait)
     f, (_, t) = field(), terminal_line()
+    t = t.split('\n')[-1]  # 줄바꿈 뒤 입력창은 새 줄부터 시작한다
     ok = f == t and (expect_field is None or f == expect_field)
     results.append(ok)
     print(('PASS' if ok else 'FAIL'), f'[{name}] 입력칸={f!r} 터미널={t!r}' + ('' if expect_field is None else f' 기대={expect_field!r}'))
@@ -98,6 +101,14 @@ def check_enter(name, expect_line):
     ok = f == '' and t == '' and lines and lines[-1] == expect_line
     results.append(ok)
     print(('PASS' if ok else 'FAIL'), f'[{name}] 보낸 줄={lines[-1] if lines else None!r} 기대={expect_line!r} 입력칸={f!r}')
+
+
+def check_newline(name, expect_text):
+    time.sleep(1.0)
+    f, (_, t) = field(), terminal_line()
+    ok = f == '' and t == expect_text + '\n'
+    results.append(ok)
+    print(('PASS' if ok else 'FAIL'), f'[{name}] 터미널={t!r} 기대={expect_text + chr(10)!r} 입력칸={f!r}')
 
 
 def ensure_device():
@@ -225,13 +236,15 @@ def main():
         before = field()
         type_keys('\b' * 6); type_keys(' ok'); check('띄어쓰기 넘어 지우고 다시 쓰기')
         expect = field()
-        type_keys('\n'); check_enter('엔터', expect)
+        type_keys('\n'); check_newline('줄바꿈', expect)
+        type_keys('\n'); check_enter('빈 입력창 엔터로 보내기', expect + '\n')
         if before == expect:
             print('  (추천 단어가 아무것도 바꾸지 않았다)')
 
         use_layout(korean=True)
         type_keys('dkssudgktpdy'); check('한글 안녕하세요', '안녕하세요')
-        type_keys('\n'); check_enter('조합 중 엔터', '안녕하세요')
+        type_keys('\n'); check_newline('조합 중 줄바꿈', '안녕하세요')
+        type_keys('\n'); check_enter('빈 입력창 엔터로 보내기', '안녕하세요\n')
         type_keys('gksrmf'); check('한글', '한글')
         type_keys('\b'); check('조합 중 지우기', '한그')
         type_keys('f'); check('다시 조합', '한글')
@@ -239,7 +252,32 @@ def main():
         type_keys('\b' * 5); check('띄어쓰기 넘어 지우기')
         type_keys(' dkssud'); check('다시 쓰기')
         expect = field()
-        type_keys('\n'); check_enter('엔터', expect)
+        type_keys('\n'); check_newline('줄바꿈', expect)
+        type_keys('\n'); check_enter('빈 입력창 엔터로 보내기', expect + '\n')
+
+        # 한글로 썼다 지웠다 반복 — Gboard는 조합 중엔 자모 단위로, 확정된 글자는 글자 단위로 지우므로 기대값 대신 입력칸==터미널만 본다
+        for r in range(3):
+            type_keys('rhdiddl'); check(f'[{r}] 고양이', '고양이')
+            type_keys('\b\b'); check(f'[{r}] 조합 중 두 번 지우기')
+            type_keys('dl'); check(f'[{r}] 다시 쓰기', '고양이')
+            type_keys(' qkek'); check(f'[{r}] 띄어 쓰기', '고양이 바다')
+            type_keys('\b' * 4); check(f'[{r}] 띄어쓰기 넘어 지우기')
+            type_keys(' skan'); check(f'[{r}] 다른 낱말로 다시 쓰기')
+            type_keys('gks\brmf\b\bfrkatk'); check(f'[{r}] 쓰다 지우다 섞어 치기')
+            type_keys('\b' * 30); check(f'[{r}] 전부 지우기', '')
+            type_keys('tkfkd'); check(f'[{r}] 지운 뒤 새로 쓰기', '사랑')
+            expect = field()
+            type_keys('\n'); check_newline(f'[{r}] 줄바꿈', expect)
+            type_keys('rkatk'); check(f'[{r}] 둘째 줄', '감사')
+            type_keys('\b' * 2); check(f'[{r}] 둘째 줄 지우기')
+            lines, t = terminal_line()
+            type_keys('dkssud'); check(f'[{r}] 다시 쓰기 안녕')
+            type_keys('\n'); time.sleep(1.0)
+            type_keys('\n'); time.sleep(1.0)
+            lines2, t2 = terminal_line()
+            ok = field() == '' and t2 == '' and len(lines2) == len(lines) + 1
+            results.append(ok)
+            print(('PASS' if ok else 'FAIL'), f'[[{r}] 보내기] 보낸 줄={lines2[-1] if lines2 else None!r} 입력칸={field()!r}')
     finally:
         srv.terminate()
         subprocess.run(['tmux', '-S', os.path.join(WORK, 'tmux', f'tmux-{os.getuid()}', 'default'), 'kill-server'],
