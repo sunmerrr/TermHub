@@ -28,6 +28,7 @@ function initWS() {
   };
   ws.onclose = () => {
     document.getElementById('status-dot').classList.add('off');
+    if (typeof resetLiveInputs === 'function') resetLiveInputs();
     scheduleReconnect(2000);
   };
   ws.onmessage = e => handleMsg(JSON.parse(e.data));

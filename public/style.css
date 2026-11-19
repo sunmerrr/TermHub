@@ -663,11 +663,10 @@ header h1 {
 }
 
 /* PC(마우스·트랙패드)는 터미널에 바로 입력한다 — 입력 줄을 숨기고 📎·⌨는 헤더(.header-tools)로 옮긴다 (workers.js directTermInput).
+   S펜 갤럭시처럼 포인터가 fine인 폰은 입력 줄을 써야 하므로 미디어 쿼리가 아니라 workers.js가 붙인 클래스로 나눈다.
    상태에 따라 인라인 display를 바꾸므로 !important로 막는다 */
-@media (pointer: fine) {
-  .input-row {
-    display: none !important;
-  }
+.direct-term-input .input-row {
+  display: none !important;
 }
 
 .header-tools {

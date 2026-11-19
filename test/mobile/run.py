@@ -172,6 +172,17 @@ def open_page():
 
 
 def focus_field():
+    # 페이지가 막 그려지는 중이면 입력칸 위치가 바뀌어 탭이 빗나간다 — 키보드가 뜰 때까지 다시 누른다
+    for _ in range(5):
+        tap_field()
+        if 'mInputShown=true' in adb('shell', 'dumpsys', 'input_method') and js('document.activeElement.id') == 'inp-1':
+            return
+        time.sleep(1)
+    sys.exit('입력칸을 눌러도 키보드가 뜨지 않음')
+
+
+def tap_field():
+    js('(() => { document.getElementById("inp-1").scrollIntoView(); return 1; })()')
     r = js('(() => { const r = document.getElementById("inp-1").getBoundingClientRect();'
            ' return [r.left + r.width / 2, r.top + r.height / 2, innerHeight, devicePixelRatio]; })()')
     cx, cy, ih, dpr = r

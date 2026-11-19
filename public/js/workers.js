@@ -584,7 +584,11 @@ const TERM_REPLY_RE = /^\x1b(\[[?>]?[\d;]*[cnR]|\[[IO]|\][^\x07\x1b]*(\x07|\x1b\
 const TERM_SCAN_THROTTLE_MS = 250;
 // 마우스·트랙패드 기기(PC)는 터미널에 바로 입력하고 아래 입력창을 숨긴다(style.css의 pointer: fine).
 // 터치 기기는 xterm.js의 한글 조합이 불안정해 입력창을 그대로 쓴다. 화면 너비가 아니라 입력 방식으로 나눈다
-const directTermInput = !!(window.matchMedia && matchMedia('(pointer: fine)').matches);
+// 갤럭시(S펜)처럼 주 포인터가 fine으로 잡히는 폰도 있다 — 폰 OS면 포인터 종류와 상관없이 폰 입력을 쓴다.
+// 폰에서 xterm.js에 바로 치면 안드로이드 한글 조합이 깨진다(자모가 쪼개지고 띄어쓰기·지우기가 사라짐). iPadOS는 Macintosh로 자신을 알린다
+const mobileOS = /Android|iPhone|iPad|iPod/i.test(navigator.userAgent) || (/Macintosh/.test(navigator.userAgent) && navigator.maxTouchPoints > 1);
+const directTermInput = !mobileOS && !!(window.matchMedia && matchMedia('(pointer: fine)').matches);
+if (directTermInput) document.documentElement.classList.add('direct-term-input');
 
 // xterm.js의 터치 스크롤은 iOS Safari에서 동작하지 않아(보이는 화면만 보이고 위로 못 올라간다) 한 손가락 스와이프를 직접 줄 스크롤로 바꾼다.
 // 두 손가락은 글자 크기 핀치(bindPinchZoom)에 맡긴다.
@@ -594,7 +598,7 @@ const TOUCH_APP_SCROLL_MAX = 32;
 
 // 다른 기기가 크기를 쥐고 있어 터미널이 폰 화면보다 넓으면, 가로로 밀지 않아도 다 보이게 화면 너비에 맞춰 축소한다.
 // 크기는 그대로 두고 보이는 모습만 줄이므로 pane이 다시 그려지지 않는다 (Orca 모바일의 fit-scale과 같은 방식)
-const touchDevice = !!(window.matchMedia && matchMedia('(pointer: coarse)').matches);
+const touchDevice = mobileOS || !!(window.matchMedia && matchMedia('(pointer: coarse)').matches);
 
 function termBaseScale(t) {
   if (!touchDevice || !t.term.element) return 1;
@@ -725,15 +729,28 @@ function createTerminal(id, box) {
     fontSize: logFontSize,
     scrollback: 5000,
     cursorBlink: false,
+    allowProposedApi: true, // unicode 폭 설정(term.unicode)이 아직 제안 API다
     theme: { background: '#0d1117', foreground: '#e6edf3', cursor: '#e6edf3', selectionBackground: '#264f78' }
   });
   const fit = new FitAddon.FitAddon();
   term.loadAddon(fit);
+  // xterm.js 기본(Unicode 6)은 이모지를 1칸으로 세지만 tmux는 2칸으로 센다 — 폭이 어긋나면 글자가 밀리고 줄이 겹친다
+  if (typeof Unicode11Addon !== 'undefined') {
+    term.loadAddon(new Unicode11Addon.Unicode11Addon());
+    term.unicode.activeVersion = '11';
+  }
   term.open(box);
   // 터치 기기에서는 터미널을 눌러도 화상 키보드를 띄우지 않는다 — 입력은 아래 입력창으로 한다
   if (touchDevice) {
     term.textarea.setAttribute('inputmode', 'none');
     bindTouchScroll(id, term, box);
+    // 터미널을 누르면 아래 입력창으로 키보드를 연다 — 글은 입력창을 거쳐 터미널로 간다(Orca 모바일과 같은 방식).
+    // xterm.js가 탭(mousedown)에서 자기 입력칸으로 포커스를 가져가므로 그 뒤에 오는 click에서 옮긴다. 스와이프 스크롤은 click이 생기지 않는다
+    box.addEventListener('click', () => {
+      const panel = box.closest('.tab-panel, .card');
+      const inp = (panel && panel.querySelector('#inp-' + id)) || document.getElementById('inp-' + id);
+      if (inp && inp.offsetParent !== null) inp.focus();
+    });
   }
   // 입력창이 없는 PC에서도 이미지 붙여넣기로 첨부할 수 있게 한다 — xterm.js보다 먼저 받아야 하므로 capture 단계에서 처리
   box.addEventListener('paste', e => {
@@ -1393,6 +1410,7 @@ function sendInput(id) {
 // 조합 중인 글자(한글 등)는 확정될 때까지 보내지 않고 들고 있는다(held). 모든 바이트는 같은 WebSocket으로 보내 순서를 지킨다.
 const LIVE_HELD_COMMIT_MS = 300; // 조합 여부를 알려 주지 않는 키보드(안드로이드)에서 들고 있던 글자를 확정하는 대기 시간
 const LIVE_DEL = '\x7f';
+const LIVE_ENDED_ECHO_MS = 500; // Orca ENDED_SESSION_ECHO_MS — 비운 뒤 늦게 도착하는 키보드 입력을 기다리는 시간
 // 입력창에 글이 있을 때는 입력창 안에서 처리한다(diff가 터미널에 반영) — 그대로 터미널에 보내면 두 번 지워진다
 const LIVE_FIELD_LOCAL_KEYS = new Set(['Backspace', 'Delete', 'ArrowLeft', 'ArrowRight', 'Home', 'End']);
 const LIVE_EMPTY_KEYS = {
@@ -1446,7 +1464,7 @@ function liveCursorKey(id, code) {
 }
 
 function liveState(id) {
-  return liveStates[id] || (liveStates[id] = { sent: '', held: '', timer: null });
+  return liveStates[id] || (liveStates[id] = { sent: '', held: '', timer: null, ended: null });
 }
 
 function liveConjoiningJamo(cp) {
@@ -1484,6 +1502,9 @@ function liveMirrorStep(sentText, fieldText, commitHeld, composing) {
 
 function liveApply(id, fieldText, commitHeld, composing) {
   const st = liveState(id);
+  // 연결이 끊긴 동안(폰이 백그라운드로 갔다 오는 등) 보낸 셈 치면 터미널과 어긋나 이후 수정이 엉뚱한 글자를 지운다.
+  // 상태를 그대로 두면 다시 연결된 뒤 다음 입력에서 그동안 바뀐 만큼 한꺼번에 보낸다
+  if (!ws || ws.readyState !== 1) return;
   const step = liveMirrorStep(st.sent, fieldText.replace(/[–—]/g, '--'), commitHeld, composing);
   st.sent = step.sent;
   st.held = step.held;
@@ -1517,8 +1538,45 @@ function endLiveSession(id) {
   st.held = '';
   st.timer = null;
   document.querySelectorAll('#inp-' + id).forEach(inp => {
+    if (inp.value) st.ended = { text: inp.value, at: Date.now() };
     inp.value = '';
     inp.style.height = 'auto';
+  });
+}
+
+// Orca dropEndedSessionEcho — 보낸 뒤 비운 입력창에 키보드가 방금 글을 다시 넣는 경우가 있다(늦게 도착한 입력).
+// 그대로 미러링하면 보낸 메시지가 다음 입력으로 한 번 더 들어간다 — 잠깐 동안 같은 글이 돌아오면 버린다
+function dropEndedLiveEcho(id, inp) {
+  const st = liveState(id);
+  const ended = st.ended;
+  if (!ended) return false;
+  if (Date.now() - ended.at > LIVE_ENDED_ECHO_MS) {
+    st.ended = null;
+    return false;
+  }
+  if (inp.value === ended.text) {
+    inp.value = '';
+    inp.style.height = 'auto';
+    return true;
+  }
+  // 비운 입력창의 빈 값 알림은 넘기고, 실제로 새 글이 들어오면 그때부터 평소대로 처리한다
+  if (inp.value) st.ended = null;
+  return false;
+}
+
+// Orca처럼 연결이 끊기면 터미널이 무엇을 받았는지 알 수 없다 — 보낸 기록과 입력창을 비우고 새로 시작한다
+function resetLiveInputs() {
+  Object.keys(liveStates).forEach(id => {
+    const st = liveStates[id];
+    clearTimeout(st.timer);
+    st.sent = '';
+    st.held = '';
+    st.timer = null;
+    st.ended = null;
+    document.querySelectorAll('#inp-' + id).forEach(inp => {
+      inp.value = '';
+      inp.style.height = 'auto';
+    });
   });
 }
 
@@ -1540,7 +1598,7 @@ function bindLiveInput(id, inp) {
     if (!liveInput) return;
     composing = false;
     // 확정의 마지막 input 이벤트는 아직 조합 중으로 오고 뒤따르는 이벤트가 없다 — 여기서 확정으로 처리한다
-    sync(false);
+    if (!dropEndedLiveEcho(id, inp)) sync(false);
     // 조합 중에 누른 Return은 확정 뒤에 한 번만 보낸다 — 뒤따르는 줄바꿈 입력(beforeinput)은 위에서 막는다
     if (pendingEnter) setTimeout(() => {
       if (!pendingEnter) return;
@@ -1549,7 +1607,7 @@ function bindLiveInput(id, inp) {
     }, 0);
   });
   inp.addEventListener('input', e => {
-    if (!liveInput) return;
+    if (!liveInput || dropEndedLiveEcho(id, inp)) return;
     sync(composing || e.isComposing);
   });
   // 폰 키보드의 Return은 keydown 없이 줄바꿈 입력으로만 오기도 한다 — 줄바꿈을 막고 Enter로 보낸다
@@ -1568,7 +1626,10 @@ function bindLiveInput(id, inp) {
     }
   });
   inp.addEventListener('keydown', e => {
-    if (!liveInput || e.ctrlKey || e.metaKey || e.altKey) return;
+    if (!liveInput) return;
+    // 실제 키를 누르면 새 입력이다(Orca와 같음). 키 정보 없는 229는 늦게 도착한 입력에도 붙어 오므로 제외한다
+    if (e.keyCode !== 229) liveState(id).ended = null;
+    if (e.ctrlKey || e.metaKey || e.altKey) return;
     if (e.key === 'Enter') {
       if (e.shiftKey) {
         // 하드웨어 키보드의 Shift+Enter — PC 터미널과 같은 줄바꿈 신호(ESC CR)
