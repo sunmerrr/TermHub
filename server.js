@@ -11,8 +11,11 @@ const { WebSocketServer } = require("ws");
 const PORT = process.env.PORT || 8081;
 const PASSWORD = process.env.DASHBOARD_PASSWORD || "changeme";
 const DISCORD_WEBHOOK = process.env.DISCORD_WEBHOOK;
-const DISCORD_USERNAME = "lulu";
-const DISCORD_AVATAR_URL = "https://api.dicebear.com/9.x/bottts/png?seed=lulu";
+// Discord 봇 이름·아바타는 .env로 바꿀 수 있다. DISCORD_USERNAME만 지정하면 아바타는 웹훅에 설정된 기본 이미지를 쓴다.
+const DISCORD_USERNAME = process.env.DISCORD_USERNAME || "lulu";
+const DISCORD_AVATAR_URL = process.env.DISCORD_USERNAME
+  ? (process.env.DISCORD_AVATAR_URL || undefined)
+  : "https://api.dicebear.com/9.x/bottts/png?seed=lulu";
 const ENABLE_TUNNEL_HEALTHCHECK = process.env.ENABLE_TUNNEL_HEALTHCHECK === "1";
 const TUNNEL_HEALTHCHECK_INTERVAL_MS = Number(process.env.TUNNEL_HEALTHCHECK_INTERVAL_MS || 30000);
 const TUNNEL_HEALTHCHECK_FAILURE_LIMIT = Number(process.env.TUNNEL_HEALTHCHECK_FAILURE_LIMIT || 2);
@@ -2398,6 +2401,19 @@ const server = http.createServer(async (req, res) => {
       return res.end(JSON.stringify({ ok: true }));
     }
     return json(res, 401, { ok: false });
+  }
+
+  // 로그아웃: 세션 쿠키(token, worker_scope) 모두 만료 — 이후 요청은 401 → 비밀번호 재입력
+  if (method === "POST" && url === "/api/logout") {
+    res.writeHead(200, {
+      "Set-Cookie": [
+        "token=; Path=/; HttpOnly; SameSite=Lax; Max-Age=0",
+        "worker_scope=; Path=/; HttpOnly; SameSite=Lax; Max-Age=0",
+      ],
+      "Content-Type": "application/json",
+      "Cache-Control": "no-store",
+    });
+    return res.end(JSON.stringify({ ok: true }));
   }
 
   if (method === "GET" && url === "/") {

@@ -82,6 +82,16 @@ header h1 {
   border-color: #2ea043;
 }
 
+#logout-btn {
+  padding: 0 8px;
+  font-size: 13px;
+}
+
+#logout-btn:hover {
+  color: #f85149;
+  border-color: #f85149;
+}
+
 .header-btn.layout-active {
   background: #1f6feb;
   border-color: #1f6feb;
@@ -1687,6 +1697,7 @@ body[data-scoped-worker] .preset-add {
   #dir-btn { order: 1; }
   #spawn-btn { order: 2; }
   #scan-btn { order: 3; }
+  #logout-btn { order: 4; }
 
   #prompt-input {
     flex-basis: 100%;

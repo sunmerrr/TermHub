@@ -33,6 +33,8 @@ function applyScopedMode(workerId) {
   if (scanBtn) scanBtn.style.display = 'none';
   if (spawnBtn) spawnBtn.style.display = 'none';
   if (pushBtn) pushBtn.style.display = 'none';
+  const logoutBtn = document.getElementById('logout-btn');
+  if (logoutBtn) logoutBtn.style.display = 'none';
 }
 
 function doLogin() {
@@ -41,11 +43,21 @@ function doLogin() {
     .then(r => r.json())
     .then(d => {
       if (d.ok) {
+        document.getElementById('pw').value = '';
         enterApp();
       } else {
         document.getElementById('login-err').style.display = 'block';
       }
     });
+}
+
+// 로그아웃: 서버 쿠키 만료 → 입력칸 비우고 전체 새로고침(SPA 상태·비밀번호 잔상 제거, 재로그인 필수)
+function doLogout() {
+  const pw = document.getElementById('pw');
+  if (pw) pw.value = '';
+  apiPost('/api/logout', {})
+    .catch(() => {})
+    .finally(() => { location.replace(location.pathname); });
 }
 
 // 기존 쿠키로 자동 로그인 시도 — 유효하면 로그인 화면 건너뜀
@@ -65,6 +77,7 @@ function toggleToolbar() {
 // ── Event Binding ──
 
 document.getElementById('login-btn').addEventListener('click', doLogin);
+document.getElementById('logout-btn').addEventListener('click', doLogout);
 document.getElementById('pw').addEventListener('keydown', e => { if (e.key === 'Enter') doLogin(); });
 document.getElementById('toggle-toolbar-btn').addEventListener('click', toggleToolbar);
 document.getElementById('dir-btn').addEventListener('click', toggleDropdown);
