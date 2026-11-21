@@ -592,8 +592,10 @@ if (directTermInput) document.documentElement.classList.add('direct-term-input')
 
 // xterm.js의 터치 스크롤은 iOS Safari에서 동작하지 않아(보이는 화면만 보이고 위로 못 올라간다) 한 손가락 스와이프를 직접 줄 스크롤로 바꾼다.
 // 두 손가락은 글자 크기 핀치(bindPinchZoom)에 맡긴다.
-const TOUCH_MOMENTUM_DECAY = 0.95;
-const TOUCH_MOMENTUM_MIN = 0.3;
+// 관성·속도 수치는 Orca 모바일(surface-touch-gestures)과 같다
+const TOUCH_FRICTION = 0.972; // 16ms마다 남는 속도 비율
+const TOUCH_MIN_VEL = 0.012; // px/ms, 이보다 느리면 관성을 멈춘다
+const TOUCH_RELEASE_MAX_AGE_MS = 100;
 const TOUCH_APP_SCROLL_MAX = 32;
 
 // 다른 기기가 크기를 쥐고 있어 터미널이 폰 화면보다 넓으면, 가로로 밀지 않아도 다 보이게 화면 너비에 맞춰 축소한다.
@@ -628,54 +630,120 @@ function fitTermWidth(id) {
 window.addEventListener('resize', () => Object.keys(terms).forEach(fitTermWidth));
 
 function bindTouchScroll(id, term, box) {
-  let lastY = null;
-  let lastT = 0;
-  let velocity = 0;
-  let pending = 0;
-  let raf = 0;
   // 브라우저 기본 팬이 끼어들면 첫 touchmove 뒤로 이벤트가 끊긴다 — 세로는 줄 스크롤, 가로는 아래에서 상자를 직접 민다
   box.style.touchAction = 'none';
   let lastX = 0;
+  let lastY = null;
+  let lastT = 0;
+  let velY = 0; // px/ms, 손가락이 위로 가면(새 출력 쪽) 양수
+  let accum = 0; // 앱으로 보내는 스크롤에서 아직 한 줄이 안 된 거리
+  let offset = 0; // 스크롤백에서 아직 한 줄이 안 된 거리
+  let pendingDelta = 0;
+  let frame = 0;
+  let momentum = 0;
+  let suppressTap = false;
   // 너비 맞춤 축소(fitTermWidth)가 걸려 있으면 화면에 보이는 줄 높이도 그만큼 작다
   const lineHeight = () => {
     const screen = box.querySelector('.xterm-screen');
     return screen && term.rows ? screen.getBoundingClientRect().height / term.rows : 16;
   };
-  // 마우스를 쓰는 앱은 휠을 직접 받는다 — 휠 이벤트로 넘겨 xterm.js가 앱이 고른 형식으로 휠 신호를 만들게 한다
-  const scrollApp = lines => {
+  // Orca shouldRouteScrollToTerminalInput — 휠을 받는 마우스 앱이나 스크롤백이 없는 전체 화면 앱이면 스크롤을 앱 입력으로 보낸다
+  const wheelMouseMode = () => term.modes.mouseTrackingMode !== 'none' && term.modes.mouseTrackingMode !== 'x10';
+  const routesToApp = () => wheelMouseMode() || term.buffer.active.type === 'alternate';
+  // Orca routeScrollLines (lines > 0이면 아래, 새 출력 쪽)
+  const routeLines = lines => {
     const n = Math.min(Math.abs(lines), TOUCH_APP_SCROLL_MAX);
-    for (let i = 0; i < n; i++) {
-      term.element.dispatchEvent(new WheelEvent('wheel', {
-        deltaY: lines > 0 ? -1 : 1, deltaMode: WheelEvent.DOM_DELTA_LINE,
-        clientX: lastX, clientY: lastY === null ? 0 : lastY, bubbles: true, cancelable: true
-      }));
+    if (wheelMouseMode()) {
+      // 휠 이벤트로 넘겨 xterm.js가 앱이 고른 형식으로 휠 신호를 만들게 한다
+      for (let i = 0; i < n; i++) {
+        term.element.dispatchEvent(new WheelEvent('wheel', {
+          deltaY: lines > 0 ? 1 : -1, deltaMode: WheelEvent.DOM_DELTA_LINE,
+          clientX: lastX, clientY: lastY === null ? 0 : lastY, bubbles: true, cancelable: true
+        }));
+      }
+      return;
     }
+    // 마우스를 쓰지 않는 전체 화면 앱(Codex 등)은 ↑/↓로 스크롤한다
+    const arrow = '\x1b' + (term.modes.applicationCursorKeysMode ? 'O' : '[') + (lines < 0 ? 'A' : 'B');
+    if (ws && ws.readyState === 1) ws.send(JSON.stringify({ type: 'input', id: String(id), data: arrow.repeat(n) }));
   };
-  // 손가락이 아래로 움직이면(dy > 0) 이전 출력 쪽(위)으로 올라간다
-  const scrollBy = dy => {
-    pending += dy;
+  const resetSmooth = () => {
+    pendingDelta = 0;
+    cancelAnimationFrame(frame);
+    frame = 0;
+    offset = 0;
+  };
+  const canScroll = d => {
+    const b = term.buffer.active;
+    return d > 0 ? b.viewportY < b.baseY : b.viewportY > 0;
+  };
+  // Orca applyNormalBufferScrollDelta — 남은 거리는 들고 있다가 한 줄이 차면 넘기고, 끝에 닿으면 버린다
+  const applyNormal = d => {
+    if (!d) return false;
+    if (!canScroll(d)) { offset = 0; return false; }
     const lh = lineHeight();
-    const lines = Math.trunc(pending / lh);
+    offset += d;
+    const lines = Math.trunc(offset / lh);
+    if (lines) {
+      const b = term.buffer.active;
+      const applied = lines > 0 ? Math.min(lines, b.baseY - b.viewportY) : Math.max(lines, -b.viewportY);
+      if (applied) term.scrollLines(applied);
+      offset = applied !== lines ? 0 : offset - applied * lh;
+    }
+    return true;
+  };
+  // touchmove를 한 프레임에 한 번으로 모아 촘촘한 화면을 매번 다시 그리지 않는다
+  const enqueueNormal = d => {
+    if (!d) return false;
+    if (!canScroll(d)) { resetSmooth(); return false; }
+    pendingDelta += d;
+    if (frame) return true;
+    frame = requestAnimationFrame(() => {
+      frame = 0;
+      const delta = pendingDelta;
+      pendingDelta = 0;
+      if (!applyNormal(delta)) resetSmooth();
+    });
+    return true;
+  };
+  const scrollApp = d => {
+    resetSmooth();
+    accum += d;
+    const lh = lineHeight();
+    const lines = Math.trunc(accum / lh);
     if (!lines) return;
-    pending -= lines * lh;
-    if (term.modes.mouseTrackingMode !== 'none') scrollApp(lines);
-    // 마우스를 쓰지 않는 전체 화면 앱에 ↑/↓를 보내면 Codex 같은 채팅 TUI에서는 입력 기록이 넘어간다 — 아무것도 하지 않는다
-    else if (term.buffer.active.type !== 'alternate') term.scrollLines(-lines);
+    accum -= lines * lh;
+    routeLines(lines);
+  };
+  // 이벤트 간격이 고르지 않아도 한 프레임의 튀는 값이 관성에 그대로 실리지 않게 평균 낸다
+  const updateVelocity = (d, dt) => {
+    if (dt <= 0) return;
+    const v = d / dt;
+    if (!Number.isFinite(v)) return;
+    velY = velY === 0 ? v : velY * 0.55 + v * 0.45;
   };
   const onMove = e => {
     if (e.touches.length !== 1 || lastY === null) return;
-    const y = e.touches[0].clientY;
-    const now = performance.now();
-    const dy = y - lastY;
-    if (now > lastT) velocity = dy / (now - lastT) * 16;
-    lastY = y;
-    lastT = now;
     e.preventDefault();
     e.stopPropagation();
+    const x = e.touches[0].clientX;
+    const y = e.touches[0].clientY;
+    const now = performance.now();
+    const dt = now - lastT;
     // 다른 기기가 크기를 쥐어 터미널이 상자보다 넓을 때만 가로로 밀린다
-    box.scrollLeft -= e.touches[0].clientX - lastX;
-    lastX = e.touches[0].clientX;
-    scrollBy(dy);
+    box.scrollLeft -= x - lastX;
+    const d = lastY - y;
+    lastT = now;
+    if (routesToApp()) {
+      updateVelocity(d, dt);
+      scrollApp(d);
+    } else if (enqueueNormal(d)) {
+      updateVelocity(d, dt);
+    } else {
+      velY = 0;
+    }
+    lastX = x;
+    lastY = y;
   };
   let target = null;
   const release = () => {
@@ -690,29 +758,47 @@ function bindTouchScroll(id, term, box) {
     release();
     if (lastY === null) return;
     lastY = null;
-    // 손을 떼기 직전에 멈춰 있었다면 관성 없이 끝낸다
-    if (e.type === 'touchcancel' || performance.now() - lastT > 100) return;
-    const step = () => {
-      velocity *= TOUCH_MOMENTUM_DECAY;
-      if (Math.abs(velocity) < TOUCH_MOMENTUM_MIN) return;
-      scrollBy(velocity);
-      raf = requestAnimationFrame(step);
+    if (e.type === 'touchcancel') { velY = 0; accum = 0; resetSmooth(); return; }
+    // 마지막 움직임 뒤 손가락을 멈췄다 떼면 관성이 없다
+    let vel = performance.now() - lastT > TOUCH_RELEASE_MAX_AGE_MS ? 0 : velY;
+    let lastFrame = performance.now();
+    const step = frameTime => {
+      const elapsed = Math.max(1, Math.min(50, frameTime - lastFrame));
+      lastFrame = frameTime;
+      vel *= TOUCH_FRICTION ** (elapsed / 16);
+      if (Math.abs(vel) < TOUCH_MIN_VEL) { momentum = 0; return; }
+      const d = vel * elapsed;
+      if (routesToApp()) scrollApp(d);
+      else if (!applyNormal(d)) { momentum = 0; return; }
+      momentum = requestAnimationFrame(step);
     };
-    raf = requestAnimationFrame(step);
+    if (Math.abs(vel) > TOUCH_MIN_VEL) momentum = requestAnimationFrame(step);
   };
+  // 관성 스크롤을 멈추려고 누른 터치는 탭(입력창 포커스)으로 치지 않는다
+  box.addEventListener('click', e => {
+    if (!suppressTap) return;
+    suppressTap = false;
+    e.preventDefault();
+    e.stopPropagation();
+  }, true);
   // 터치 이벤트는 손가락이 처음 닿은 요소로만 간다. xterm.js가 스크롤하며 줄 DOM을 새로 그리면 그 요소가 문서에서 빠져
   // 상자까지 올라오지 않으므로, 이동·종료 리스너는 그 요소에 직접 단다
   box.addEventListener('touchstart', e => {
-    cancelAnimationFrame(raf);
+    suppressTap = false;
+    if (momentum) {
+      cancelAnimationFrame(momentum);
+      momentum = 0;
+      suppressTap = true;
+    }
     release();
     // 다른 기기 크기라 축소돼 보이던 터미널을 만지면 이 폰이 크기를 가져와 글자가 제 크기로 다시 그려진다
     if (termBaseScale(terms[id]) < 1) notifyActive(id);
-    if (e.touches.length !== 1) { lastY = null; return; }
+    if (e.touches.length !== 1) { lastY = null; resetSmooth(); return; }
     lastY = e.touches[0].clientY;
     lastX = e.touches[0].clientX;
     lastT = performance.now();
-    velocity = 0;
-    pending = 0;
+    velY = 0;
+    accum = 0;
     target = e.target;
     target.addEventListener('touchmove', onMove, { passive: false });
     target.addEventListener('touchend', onEnd);
