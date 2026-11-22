@@ -814,6 +814,9 @@ function createTerminal(id, box) {
     fontFamily: '"SF Mono", Menlo, Consolas, monospace',
     fontSize: logFontSize,
     scrollback: 5000,
+    // Orca 데스크톱 기본값 — 휠 한 칸이 조금 더 가고, Alt+휠은 5배로 빨리 넘긴다
+    scrollSensitivity: 1.15,
+    fastScrollSensitivity: 5,
     cursorBlink: false,
     allowProposedApi: true, // unicode 폭 설정(term.unicode)이 아직 제안 API다
     theme: { background: '#0d1117', foreground: '#e6edf3', cursor: '#e6edf3', selectionBackground: '#264f78' }
